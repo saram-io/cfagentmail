@@ -1,7 +1,7 @@
 // CFAgentMail Core Type Definitions
 
 export interface Inbox {
-  id: string; // usually same as email or unique id
+  id: string;
   email: string;
   username: string;
   domain: string;
@@ -96,6 +96,43 @@ export interface ApiKey {
   createdAt: number;
 }
 
+export interface Webhook {
+  id: string;
+  inboxId: string | null;
+  url: string;
+  events: string[];
+  secret: string;
+  isActive: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WebhookDelivery {
+  id: string;
+  webhookId: string;
+  eventType: string;
+  payload: string;
+  responseStatus?: number | null;
+  responseBody?: string | null;
+  durationMs?: number | null;
+  error?: string | null;
+  createdAt: number;
+}
+
+export type RealtimeEventType =
+  | "email.received"
+  | "email.sent"
+  | "draft.created"
+  | "draft.updated"
+  | "thread.updated";
+
+export interface RealtimeEvent {
+  type: RealtimeEventType;
+  inboxId: string;
+  timestamp: number;
+  data: Record<string, any>;
+}
+
 // Search Results with Highlights
 export interface ThreadSearchResult extends Thread {
   highlights?: Record<string, string[]>;
@@ -131,7 +168,7 @@ export interface SendMessageRequest {
   labels?: string[];
   attachments?: {
     filename: string;
-    content: string; // base64 or plain string
+    content: string;
     type?: string;
     disposition?: "attachment" | "inline";
     contentId?: string;
@@ -210,6 +247,19 @@ export interface CreateApiKeyResponse {
   name: string;
   inboxId: string | null;
   createdAt: number;
+}
+
+export interface CreateWebhookRequest {
+  url: string;
+  events?: string[];
+  inboxId?: string | null;
+  secret?: string;
+}
+
+export interface UpdateWebhookRequest {
+  url?: string;
+  events?: string[];
+  isActive?: boolean;
 }
 
 export interface PaginatedList<T> {

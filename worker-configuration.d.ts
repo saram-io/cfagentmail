@@ -3,6 +3,7 @@
 interface Env {
 	DEFAULT_DOMAIN: "cfagentmail.com";
 	ALLOW_AUTO_PROVISION_INBOX: "true";
+	REALTIME_DO: DurableObjectNamespace<import("./src/index").InboxRealtimeDO>;
 	ATTACHMENTS: R2Bucket;
 	DB: D1Database;
 	EMAIL: SendEmail;

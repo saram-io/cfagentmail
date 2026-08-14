@@ -1,8 +1,8 @@
 # CFAgentMail
 
-> An API-first, serverless email platform built for AI agents — running natively on Cloudflare Workers, Cloudflare Email Service, D1 (SQLite), and R2.
+> An API-first, serverless email platform built for AI agents — running natively on Cloudflare Workers, Cloudflare Email Service, D1 (SQLite), R2, and Durable Objects.
 
-CFAgentMail gives AI agents their own programmable inboxes to send, receive, thread, and process emails at edge scale with zero per-seat subscription costs.
+CFAgentMail gives AI agents their own programmable inboxes to send, receive, thread, search, and stream emails at edge scale with zero per-seat subscription costs.
 
 ---
 
@@ -12,10 +12,14 @@ CFAgentMail gives AI agents their own programmable inboxes to send, receive, thr
 - 📥 **Inbound Email Ingestion**: Native Cloudflare Email Routing handler with full MIME decoding (`postal-mime`), attachment extraction, and automatic inbox auto-provisioning.
 - 📤 **Outbound Email Delivery**: High-deliverability transactional sending via Cloudflare Email Sending (`send_email` binding) with SPF, DKIM, and DMARC.
 - 🧵 **Automatic Conversation Threading**: Group multi-turn messages into threads using RFC 2822 (`Message-ID`, `In-Reply-To`, `References`) headers with subject normalization fallback.
+- 🔍 **SQLite FTS5 Full-Text Search**: Sub-millisecond full-text search across subject and body text with BM25 relevance ranking and keyword highlight snippets (`**term**`).
+- 📝 **Drafts & Human-In-The-Loop (HITL)**: Create, stage, review, and edit email drafts before dispatching via supervisor approval.
+- ⚡ **Real-Time WebSockets**: Zero-idle-cost WebSocket streaming powered by Cloudflare Durable Object Hibernation API (`/v1/inboxes/:id/ws` and `/v1/ws`).
+- 🪝 **HMAC-Signed Webhooks**: Cryptographically verified webhook event dispatching (`email.received`, `email.sent`, `draft.created`, etc.) with delivery tracking.
 - 📎 **Attachment & Raw EML Storage**: Direct streaming of attachments and raw `.eml` RFC822 files into Cloudflare R2 object storage.
 - 🔑 **Fine-Grained Scoped API Keys**: Issue SHA-256 hashed API keys scoped to individual inboxes to enforce least-privilege access for agent fleets.
 - 🛡️ **Idempotent Operations**: Avoid duplicate resource creation and double-sends using `clientId` on inboxes and custom idempotency keys.
-- 🧪 **100% Tested at the Edge**: Comprehensive test suite running directly inside the real `workerd` runtime using `@cloudflare/vitest-pool-workers`.
+- 🧪 **100% Tested at the Edge**: Comprehensive 29-test suite running directly inside the real `workerd` runtime using `@cloudflare/vitest-pool-workers`.
 
 ---
 
@@ -39,24 +43,26 @@ CFAgentMail gives AI agents their own programmable inboxes to send, receive, thr
 │  1. Ingestion: Buffer `message.raw` -> Parse via `postal-mime` -> Extract reply content          │
 │  2. Target Resolution: Match inbox or auto-provision if enabled                                  │
 │  3. Attachments: Save binary attachment buffers to Cloudflare R2                                 │
-│  4. Indexing: Persist messages, metadata, and thread associations into Cloudflare D1 (SQLite)    │
+│  4. Indexing: Persist messages & threads into D1 + sync FTS5 search index                        │
 │  5. Raw Archive: Store full .eml RFC822 byte stream into Cloudflare R2                           │
-└──────────────────────┬───────────────────────────────────────────────┬───────────────────────────┘
-                       │                                               │
-                       ▼                                               ▼
-       ┌───────────────────────────────┐               ┌───────────────────────────┐
-       │     Cloudflare D1 (SQLite)    │               │       Cloudflare R2       │
-       │   - Inboxes & Metadata        │               │   - Raw .eml MIME files   │
-       │   - Threads & Messages        │               │   - Message attachments   │
-       │   - Attachments metadata      │               │   - Binary downloads      │
-       │   - Scoped API Keys           │               │                           │
-       └───────────────────────────────┘               └───────────────────────────┘
-                       ▲
-                       │
-┌──────────────────────┴───────────────────────────────────────────────────────────────────────────┐
+│  6. Push Dispatch: Broadcast to Durable Object WebSockets & send HMAC-signed Webhooks            │
+└──────────────┬───────────────────────────────┬───────────────────────────────┬───────────────────┘
+               │                               │                               │
+               ▼                               ▼                               ▼
+┌───────────────────────────────┐ ┌───────────────────────────┐ ┌──────────────────────────────────┐
+│     Cloudflare D1 (SQLite)    │ │       Cloudflare R2       │ │   Durable Object Hibernation     │
+│   - Inboxes & Metadata        │ │   - Raw .eml MIME files   │ │   - Inbox-scoped WebSocket stream│
+│   - Threads & Messages        │ │   - Message attachments   │ │   - Org-wide WebSocket stream    │
+│   - FTS5 Full-Text Search     │ │   - Binary downloads      │ │   - Real-time event broadcasts   │
+│   - Webhooks & Delivery Logs  │ └───────────────────────────┘ └──────────────────────────────────┘
+│   - Scoped API Keys           │
+└───────────────────────────────┘
+               ▲
+               │
+┌──────────────┴───────────────────────────────────────────────────────────────────────────────────┐
 │ REST API Clients & Agents (Claude Code, Cursor, LangChain, Python / TS SDKs)                     │
 │                                                                                                  │
-│  - REST Endpoints: `/v1/inboxes`, `/v1/inboxes/:id/messages`, `/v1/inboxes/:id/api-keys`        │
+│  - REST Endpoints: `/v1/inboxes`, `/v1/threads`, `/v1/drafts`, `/v1/webhooks`, `/v1/api-keys`    │
 │  - Outbound Delivery: Native `env.EMAIL.send()` via Cloudflare Email Sending                     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -72,7 +78,7 @@ CFAgentMail gives AI agents their own programmable inboxes to send, receive, thr
 
 ### 2. Installation
 ```bash
-git clone https://github.com/your-username/cfagentmail.git
+git clone https://github.com/saram-io/cfagentmail.git
 cd cfagentmail
 npm install
 ```
@@ -197,6 +203,11 @@ Content-Type: application/json
 GET /v1/inboxes/support-agent@yourdomain.com/messages?limit=20
 ```
 
+#### Search Messages (FTS5)
+```http
+GET /v1/inboxes/support-agent@yourdomain.com/messages/search?q=invoice
+```
+
 #### Get Message
 ```http
 GET /v1/inboxes/support-agent@yourdomain.com/messages/msg_12345
@@ -304,6 +315,81 @@ POST /v1/inboxes/support-agent@yourdomain.com/drafts/draft_12345/send
 
 ---
 
+### WebSockets (Real-Time Push Stream)
+
+Connect via standard WebSocket with your API key or Bearer token:
+
+#### Inbox-Scoped Real-Time Stream
+```
+wss://api.yourdomain.com/v1/inboxes/support-agent@yourdomain.com/ws
+```
+
+#### Organization-Wide Real-Time Stream
+```
+wss://api.yourdomain.com/v1/ws
+```
+
+*Example Received Event:*
+```json
+{
+  "type": "email.received",
+  "inboxId": "support-agent@yourdomain.com",
+  "timestamp": 1770984000000,
+  "data": {
+    "message_id": "msg_12345",
+    "thread_id": "th_67890",
+    "from": { "email": "user@client.com", "name": "Alice" },
+    "subject": "Need help with API integration",
+    "snippet": "Hello, I am getting a 401 Unauthorized..."
+  }
+}
+```
+
+---
+
+### Webhooks
+
+#### Create Webhook Subscription
+```http
+POST /v1/webhooks
+Content-Type: application/json
+
+{
+  "url": "https://api.myagent.com/webhooks/cfagentmail",
+  "events": ["email.received", "email.sent", "draft.created"],
+  "inboxId": "support-agent@yourdomain.com",
+  "secret": "whsec_custom_secret_key"
+}
+```
+*Response (`201 Created`):*
+```json
+{
+  "webhook_id": "wh_abcd1234",
+  "id": "wh_abcd1234",
+  "inbox_id": "support-agent@yourdomain.com",
+  "url": "https://api.myagent.com/webhooks/cfagentmail",
+  "events": ["email.received", "email.sent", "draft.created"],
+  "secret": "whsec_custom_secret_key",
+  "is_active": true,
+  "created_at": "2026-08-14T12:00:00.000Z",
+  "updated_at": "2026-08-14T12:00:00.000Z"
+}
+```
+
+#### List Webhook Delivery History
+```http
+GET /v1/webhooks/wh_abcd1234/deliveries
+```
+
+#### Verifying Webhook Signatures
+Every webhook request contains the header:
+```
+X-CFAgentMail-Signature: t=1770984000000,v1=9f83b2...
+```
+Compute `HMAC-SHA256(secret, "${timestamp}.${rawBody}")` and verify equality with `v1`.
+
+---
+
 ### API Keys
 
 #### Create Inbox-Scoped API Key
@@ -377,7 +463,7 @@ npm run deploy
 
 - [x] **Phase 1**: Core Mailbox & Ingestion Engine (D1 schema, Email Routing handler, Email Sending binding, R2 storage, REST API).
 - [x] **Phase 2**: Full-Text Search with SQLite FTS5, Conversation Threading, and Drafts / HITL Workflow.
-- [ ] **Phase 3**: Real-time WebSockets with Durable Object Hibernation API & Cloudflare Queues for Webhooks.
+- [x] **Phase 3**: Real-time WebSockets with Durable Object Hibernation API & HMAC-Signed Webhook Subscriptions.
 - [ ] **Phase 4**: Multi-Tenant Pods, Allow/Block Lists, and Workers AI Auto-Labeling.
 - [ ] **Phase 5**: Model Context Protocol (MCP) Server and Official TypeScript / Python SDKs.
 

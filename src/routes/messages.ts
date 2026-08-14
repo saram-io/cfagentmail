@@ -14,6 +14,7 @@ import {
 } from "../db/queries";
 import { sendEmailViaBinding } from "../services/email-sender";
 import { saveAttachment, getAttachmentObject, getRawEmail } from "../services/storage";
+import { emitEvent } from "../services/realtime-notifier";
 import type { SendMessageRequest } from "../types";
 
 const messagesRouter = new Hono<{ Bindings: Env }>();
@@ -205,6 +206,14 @@ messagesRouter.post("/:inbox_id/messages", async (c) => {
       });
     }
   }
+
+  await emitEvent(
+    c.env,
+    "email.sent",
+    inbox.id,
+    { message_id: created.id, thread_id: created.threadId, subject: created.subject, to: created.to },
+    c.executionCtx
+  );
 
   return c.json(
     {
@@ -502,6 +511,14 @@ messagesRouter.post("/:inbox_id/messages/:message_id/reply", async (c) => {
     labels: ["SENT"],
     isRead: true,
   });
+
+  await emitEvent(
+    c.env,
+    "email.sent",
+    inbox.id,
+    { message_id: created.id, thread_id: created.threadId, subject: created.subject, to: created.to },
+    c.executionCtx
+  );
 
   return c.json(
     {

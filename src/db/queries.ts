@@ -9,6 +9,10 @@ import type {
   MessageSearchResult,
   ListThreadsOptions,
   UpdateInboxRequest,
+  Webhook,
+  WebhookDelivery,
+  CreateWebhookRequest,
+  UpdateWebhookRequest,
 } from "../types";
 import { saveAttachment } from "../services/storage";
 import { sendEmailViaBinding } from "../services/email-sender";
@@ -1331,4 +1335,262 @@ export async function deleteApiKey(
 
   const res = await db.prepare(query).bind(...params).run();
   return (res.meta?.changes ?? 0) > 0;
+}
+
+// -----------------------------
+// Webhooks
+// -----------------------------
+
+export async function createWebhookRecord(
+  db: D1Database,
+  data: {
+    id: string;
+    inboxId?: string | null;
+    url: string;
+    events: string[];
+    secret: string;
+    isActive?: boolean;
+  }
+): Promise<Webhook> {
+  const now = Date.now();
+  const eventsStr = JSON.stringify(data.events || []);
+  const isActiveNum = data.isActive === false ? 0 : 1;
+
+  await db
+    .prepare(
+      `INSERT INTO webhooks (id, inbox_id, url, events, secret, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(
+      data.id,
+      data.inboxId || null,
+      data.url,
+      eventsStr,
+      data.secret,
+      isActiveNum,
+      now,
+      now
+    )
+    .run();
+
+  return {
+    id: data.id,
+    inboxId: data.inboxId || null,
+    url: data.url,
+    events: data.events,
+    secret: data.secret,
+    isActive: isActiveNum === 1,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export async function getWebhook(
+  db: D1Database,
+  webhookId: string,
+  inboxId?: string
+): Promise<Webhook | null> {
+  let query = "SELECT * FROM webhooks WHERE id = ?";
+  const params: any[] = [webhookId];
+
+  if (inboxId) {
+    query += " AND (inbox_id = ? OR inbox_id IS NULL)";
+    params.push(inboxId);
+  }
+
+  const row = await db.prepare(query).bind(...params).first<any>();
+  if (!row) return null;
+  return mapWebhookRow(row);
+}
+
+export async function listWebhooks(
+  db: D1Database,
+  inboxId?: string | null,
+  limit: number = 50,
+  offset: number = 0
+): Promise<{ webhooks: Webhook[]; total: number }> {
+  let countSql = "SELECT COUNT(*) as count FROM webhooks";
+  const params: any[] = [];
+
+  if (inboxId) {
+    countSql += " WHERE inbox_id = ? OR inbox_id IS NULL";
+    params.push(inboxId);
+  }
+
+  const countRow = await db.prepare(countSql).bind(...params).first<{ count: number }>();
+  const total = countRow?.count || 0;
+
+  let query = "SELECT * FROM webhooks";
+  if (inboxId) {
+    query += " WHERE inbox_id = ? OR inbox_id IS NULL";
+  }
+  query += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  const queryParams = [...params, limit, offset];
+
+  const results = await db.prepare(query).bind(...queryParams).all<any>();
+  const webhooks = (results.results || []).map(mapWebhookRow);
+
+  return { webhooks, total };
+}
+
+export async function updateWebhookRecord(
+  db: D1Database,
+  webhookId: string,
+  updates: UpdateWebhookRequest,
+  inboxId?: string
+): Promise<Webhook | null> {
+  const existing = await getWebhook(db, webhookId, inboxId);
+  if (!existing) return null;
+
+  const now = Date.now();
+  const url = updates.url !== undefined ? updates.url : existing.url;
+  const events = updates.events !== undefined ? updates.events : existing.events;
+  const isActive = updates.isActive !== undefined ? updates.isActive : existing.isActive;
+
+  await db
+    .prepare(
+      `UPDATE webhooks 
+       SET url = ?, events = ?, is_active = ?, updated_at = ? 
+       WHERE id = ?`
+    )
+    .bind(url, JSON.stringify(events), isActive ? 1 : 0, now, webhookId)
+    .run();
+
+  return {
+    ...existing,
+    url,
+    events,
+    isActive,
+    updatedAt: now,
+  };
+}
+
+export async function deleteWebhookRecord(
+  db: D1Database,
+  webhookId: string,
+  inboxId?: string
+): Promise<boolean> {
+  let query = "DELETE FROM webhooks WHERE id = ?";
+  const params: any[] = [webhookId];
+
+  if (inboxId) {
+    query += " AND (inbox_id = ? OR inbox_id IS NULL)";
+    params.push(inboxId);
+  }
+
+  const res = await db.prepare(query).bind(...params).run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+export async function listActiveWebhooksForEvent(
+  db: D1Database,
+  eventType: string,
+  inboxId: string
+): Promise<Webhook[]> {
+  const results = await db
+    .prepare(
+      `SELECT * FROM webhooks 
+       WHERE is_active = 1 
+         AND (inbox_id = ? OR inbox_id IS NULL) 
+         AND (events LIKE ? OR events LIKE '%"*"%')`
+    )
+    .bind(inboxId, `%"${eventType}"%`)
+    .all<any>();
+
+  return (results.results || []).map(mapWebhookRow);
+}
+
+export async function recordWebhookDelivery(
+  db: D1Database,
+  data: {
+    id: string;
+    webhookId: string;
+    eventType: string;
+    payload: string;
+    responseStatus?: number | null;
+    responseBody?: string | null;
+    durationMs?: number | null;
+    error?: string | null;
+  }
+): Promise<WebhookDelivery> {
+  const now = Date.now();
+  await db
+    .prepare(
+      `INSERT INTO webhook_deliveries (id, webhook_id, event_type, payload, response_status, response_body, duration_ms, error, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(
+      data.id,
+      data.webhookId,
+      data.eventType,
+      data.payload,
+      data.responseStatus || null,
+      data.responseBody || null,
+      data.durationMs || null,
+      data.error || null,
+      now
+    )
+    .run();
+
+  return {
+    id: data.id,
+    webhookId: data.webhookId,
+    eventType: data.eventType,
+    payload: data.payload,
+    responseStatus: data.responseStatus || null,
+    responseBody: data.responseBody || null,
+    durationMs: data.durationMs || null,
+    error: data.error || null,
+    createdAt: now,
+  };
+}
+
+export async function listWebhookDeliveries(
+  db: D1Database,
+  webhookId: string,
+  limit: number = 20,
+  offset: number = 0
+): Promise<{ deliveries: WebhookDelivery[]; total: number }> {
+  const countRow = await db
+    .prepare("SELECT COUNT(*) as count FROM webhook_deliveries WHERE webhook_id = ?")
+    .bind(webhookId)
+    .first<{ count: number }>();
+  const total = countRow?.count || 0;
+
+  const results = await db
+    .prepare(
+      `SELECT * FROM webhook_deliveries 
+       WHERE webhook_id = ? 
+       ORDER BY created_at DESC 
+       LIMIT ? OFFSET ?`
+    )
+    .bind(webhookId, limit, offset)
+    .all<any>();
+
+  const deliveries = (results.results || []).map((row) => ({
+    id: row.id,
+    webhookId: row.webhook_id,
+    eventType: row.event_type,
+    payload: row.payload,
+    responseStatus: row.response_status,
+    responseBody: row.response_body,
+    durationMs: row.duration_ms,
+    error: row.error,
+    createdAt: row.created_at,
+  }));
+
+  return { deliveries, total };
+}
+
+function mapWebhookRow(row: any): Webhook {
+  return {
+    id: row.id,
+    inboxId: row.inbox_id,
+    url: row.url,
+    events: row.events ? JSON.parse(row.events) : [],
+    secret: row.secret,
+    isActive: row.is_active === 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }

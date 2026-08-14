@@ -5,9 +5,11 @@ import { messagesRouter } from "./routes/messages";
 import { apiKeysRouter } from "./routes/api-keys";
 import { threadsRouter, orgThreadsRouter } from "./routes/threads";
 import { draftsRouter, orgDraftsRouter } from "./routes/drafts";
+import { webhooksRouter } from "./routes/webhooks";
 import { authMiddleware } from "./middleware/auth";
 import { parseRawEmail } from "./services/email-parser";
 import { saveRawEmail, saveAttachment } from "./services/storage";
+import { emitEvent } from "./services/realtime-notifier";
 import {
   getInbox,
   createInbox,
@@ -15,6 +17,9 @@ import {
   createMessage,
   createAttachment,
 } from "./db/queries";
+
+// Export Durable Object class so Cloudflare Workers runtime can instantiate it
+export { InboxRealtimeDO } from "./durable-objects/realtime";
 
 // Initialize Hono REST App
 const app = new Hono<{ Bindings: Env }>();
@@ -27,7 +32,7 @@ app.get("/v1/health", (c) => {
     status: "healthy",
     timestamp: new Date().toISOString(),
     service: "cfagentmail",
-    version: "0.2.0",
+    version: "0.3.0",
   });
 });
 
@@ -40,12 +45,43 @@ app.get("/v1/auth/me", authMiddleware, (c) => {
   });
 });
 
+// WebSocket Real-time stream endpoints
+// 1. Inbox-scoped stream: /v1/inboxes/:inbox_id/ws
+app.get("/v1/inboxes/:inbox_id/ws", async (c) => {
+  const inboxId = c.req.param("inbox_id");
+  const inbox = await getInbox(c.env.DB, inboxId);
+  if (!inbox) {
+    return c.json({ error: { code: "NOT_FOUND", message: "Inbox not found" } }, 404);
+  }
+
+  if (!c.env.REALTIME_DO) {
+    return c.text("Real-time Durable Objects not configured", 500);
+  }
+
+  const id = c.env.REALTIME_DO.idFromName(inbox.id);
+  const stub = c.env.REALTIME_DO.get(id);
+  return stub.fetch(c.req.raw);
+});
+
+// 2. Org-wide global stream: /v1/ws
+app.get("/v1/ws", async (c) => {
+  if (!c.env.REALTIME_DO) {
+    return c.text("Real-time Durable Objects not configured", 500);
+  }
+
+  const id = c.env.REALTIME_DO.idFromName("org_global");
+  const stub = c.env.REALTIME_DO.get(id);
+  return stub.fetch(c.req.raw);
+});
+
 // Apply auth middleware to all /v1 endpoints
 app.use("/v1/inboxes/*", authMiddleware);
 app.use("/v1/threads/*", authMiddleware);
 app.use("/v1/threads", authMiddleware);
 app.use("/v1/drafts/*", authMiddleware);
 app.use("/v1/drafts", authMiddleware);
+app.use("/v1/webhooks/*", authMiddleware);
+app.use("/v1/webhooks", authMiddleware);
 
 // Mount Inbox-scoped routes
 app.route("/v1/inboxes", inboxesRouter);
@@ -57,6 +93,7 @@ app.route("/v1/inboxes", apiKeysRouter);
 // Mount Org-wide routes (for supervisor agents)
 app.route("/v1/threads", orgThreadsRouter);
 app.route("/v1/drafts", orgDraftsRouter);
+app.route("/v1/webhooks", webhooksRouter);
 
 // Global 404 handler
 app.notFound((c) => {
@@ -186,6 +223,22 @@ export default {
       }
 
       console.log(`[CFAgentMail Inbound] Successfully saved message ${messageId} to inbox ${inbox.id} in thread ${thread.id}`);
+
+      // 9. Emit real-time WebSocket and Webhook events
+      await emitEvent(
+        env,
+        "email.received",
+        inbox.id,
+        {
+          message_id: createdMsg.id,
+          thread_id: thread.id,
+          from: createdMsg.from,
+          to: createdMsg.to,
+          subject: createdMsg.subject,
+          snippet: createdMsg.snippet,
+        },
+        ctx
+      );
     } catch (error) {
       console.error("[CFAgentMail Inbound] Error processing incoming email:", error);
     }

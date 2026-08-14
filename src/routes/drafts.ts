@@ -11,6 +11,7 @@ import {
   createAttachment,
 } from "../db/queries";
 import { saveAttachment } from "../services/storage";
+import { emitEvent } from "../services/realtime-notifier";
 
 const draftsRouter = new Hono<{ Bindings: Env }>();
 
@@ -123,6 +124,14 @@ draftsRouter.post("/:inbox_id/drafts", async (c) => {
       });
     }
   }
+
+  await emitEvent(
+    c.env,
+    "draft.created",
+    inbox.id,
+    { draft_id: draft.id, thread_id: draft.threadId, subject: draft.subject },
+    c.executionCtx
+  );
 
   return c.json(
     {
@@ -260,6 +269,14 @@ draftsRouter.patch("/:inbox_id/drafts/:draft_id", async (c) => {
     return c.json({ error: { code: "NOT_FOUND", message: "Draft not found" } }, 404);
   }
 
+  await emitEvent(
+    c.env,
+    "draft.updated",
+    inbox.id,
+    { draft_id: updated.id, thread_id: updated.threadId, subject: updated.subject },
+    c.executionCtx
+  );
+
   return c.json({
     draft_id: updated.id,
     id: updated.id,
@@ -306,6 +323,15 @@ draftsRouter.post("/:inbox_id/drafts/:draft_id/send", async (c) => {
 
   try {
     const sentMessage = await sendDraft(c.env.DB, c.env.EMAIL, draftId, inbox.id);
+
+    await emitEvent(
+      c.env,
+      "email.sent",
+      inbox.id,
+      { message_id: sentMessage.id, thread_id: sentMessage.threadId, subject: sentMessage.subject },
+      c.executionCtx
+    );
+
     return c.json({
       message_id: sentMessage.id,
       id: sentMessage.id,
