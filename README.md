@@ -484,6 +484,39 @@ Compute `HMAC-SHA256(secret, "${timestamp}.${rawBody}")` and verify equality wit
 
 ---
 
+### Local Agent Integration (Hermes Agent & Cloudflare Tunnel)
+
+Run autonomous AI agents like **Hermes Agent** locally on your machine and receive real-time email triggers via **Cloudflare Tunnel (`cloudflared`)**:
+
+1. **Start the local Hermes bridge:**
+   ```bash
+   export HERMES_BRIDGE_PORT=8788
+   export CFAGENTMAIL_WEBHOOK_SECRET="whsec_my_secret"
+   npx tsx examples/hermes-agent/receiver.ts
+   ```
+
+2. **Open a Cloudflare Quick Tunnel:**
+   ```bash
+   cloudflared tunnel --url http://localhost:8788
+   ```
+
+3. **Register your tunnel URL with CFAgentMail:**
+   ```bash
+   curl -X POST https://api.yourdomain.com/v1/webhooks \
+     -H "Authorization: Bearer am_live_your_key" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "url": "https://your-tunnel.trycloudflare.com/webhook",
+       "events": ["email.received"],
+       "inboxId": "hermes@yourdomain.com",
+       "secret": "whsec_my_secret"
+     }'
+   ```
+
+See the full guide in [`docs/hermes-tunnel-guide.md`](docs/hermes-tunnel-guide.md).
+
+---
+
 ### API Keys
 
 #### Create Inbox-Scoped API Key

@@ -1,0 +1,44 @@
+# ==============================================================================
+# Hermes Agent Configuration (~/.hermes/config.yaml)
+# Example integration with CFAgentMail via Cloudflare Tunnel & Webhooks
+# ==============================================================================
+
+agent:
+  name: "Hermes Email Assistant"
+  system_prompt: |
+    You are an autonomous email assistant powered by Hermes Agent and CFAgentMail.
+    When you receive an email webhook notification:
+    1. Read the sender, subject, and snippet carefully.
+    2. Determine whether this requires an autonomous reply, task execution, or human review.
+    3. If replying, call the cfagentmail_send_message or cfagentmail_reply tool.
+
+# Hermes Webhook Gateway configuration
+gateway:
+  enabled: true
+  port: 8080
+  routes:
+    - path: "/webhook"
+      events:
+        - "email.received"
+        - "draft.created"
+
+# Email Tools / Skills Configuration
+tools:
+  - name: "cfagentmail"
+    type: "rest_api"
+    base_url: "https://api.yourdomain.com/v1" # or http://localhost:8787/v1
+    headers:
+      Authorization: "Bearer am_live_your_cfagentmail_api_key"
+    endpoints:
+      - name: "list_threads"
+        method: "GET"
+        path: "/inboxes/{inbox_id}/threads"
+      - name: "get_thread"
+        method: "GET"
+        path: "/inboxes/{inbox_id}/threads/{thread_id}"
+      - name: "reply_message"
+        method: "POST"
+        path: "/inboxes/{inbox_id}/messages/{message_id}/reply"
+      - name: "create_draft"
+        method: "POST"
+        path: "/inboxes/{inbox_id}/drafts"
