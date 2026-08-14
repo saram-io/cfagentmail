@@ -23,7 +23,7 @@ CFAgentMail gives AI agents their own programmable inboxes to send, receive, thr
 - 📎 **Attachment & Raw EML Storage**: Direct streaming of attachments and raw `.eml` RFC822 files into Cloudflare R2 object storage.
 - 🔑 **Fine-Grained Scoped API Keys**: Issue SHA-256 hashed API keys scoped to individual inboxes or pods to enforce least-privilege access for agent fleets.
 - 🛡️ **Idempotent Operations**: Avoid duplicate resource creation and double-sends using `clientId` on inboxes and custom idempotency keys.
-- 🧪 **100% Tested at the Edge**: Comprehensive 37-test suite running directly inside the real `workerd` runtime using `@cloudflare/vitest-pool-workers`.
+- 🧪 **100% Tested at the Edge**: Comprehensive 40-test suite running directly inside the real `workerd` runtime using `@cloudflare/vitest-pool-workers`.
 
 ---
 
