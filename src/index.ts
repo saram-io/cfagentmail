@@ -1,0 +1,178 @@
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { inboxesRouter } from "./routes/inboxes";
+import { messagesRouter } from "./routes/messages";
+import { apiKeysRouter } from "./routes/api-keys";
+import { authMiddleware } from "./middleware/auth";
+import { parseRawEmail } from "./services/email-parser";
+import { saveRawEmail, saveAttachment } from "./services/storage";
+import {
+  getInbox,
+  createInbox,
+  getOrCreateThread,
+  createMessage,
+  createAttachment,
+} from "./db/queries";
+
+// Initialize Hono REST App
+const app = new Hono<{ Bindings: Env }>();
+
+app.use("*", cors());
+
+// Health check endpoint
+app.get("/v1/health", (c) => {
+  return c.json({
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    service: "cfagentmail",
+    version: "0.1.0",
+  });
+});
+
+// Auth inspection endpoint
+app.get("/v1/auth/me", authMiddleware, (c) => {
+  const auth = c.get("auth" as any);
+  return c.json({
+    authenticated: true,
+    auth,
+  });
+});
+
+// Mount authenticated API routes
+app.use("/v1/inboxes/*", authMiddleware);
+app.route("/v1/inboxes", inboxesRouter);
+app.route("/v1/inboxes", messagesRouter);
+app.route("/v1/inboxes", apiKeysRouter);
+
+// Global 404 handler
+app.notFound((c) => {
+  return c.json({ error: { code: "NOT_FOUND", message: "Route not found" } }, 404);
+});
+
+// Global Error handler
+app.onError((err, c) => {
+  console.error("API Error:", err);
+  return c.json(
+    {
+      error: {
+        code: "INTERNAL_ERROR",
+        message: err.message || "An unexpected error occurred",
+      },
+    },
+    500
+  );
+});
+
+export default {
+  // HTTP Fetch Handler
+  fetch: app.fetch,
+
+  // Cloudflare Email Routing Ingestion Handler
+  async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
+    try {
+      console.log(`[CFAgentMail Inbound] Received email from ${message.from} to ${message.to}`);
+
+      // 1. Buffer raw MIME stream (must be buffered once before consumption)
+      const rawBuffer = await new Response(message.raw).arrayBuffer();
+
+      // 2. Parse MIME structure
+      const parsed = await parseRawEmail(rawBuffer);
+
+      // 3. Resolve Target Inbox
+      const recipientAddress = message.to.toLowerCase();
+      let inbox = await getInbox(env.DB, recipientAddress);
+
+      if (!inbox) {
+        if (env.ALLOW_AUTO_PROVISION_INBOX === "true") {
+          const [username, domain] = recipientAddress.split("@");
+          console.log(`[CFAgentMail Inbound] Auto-provisioning inbox for ${recipientAddress}`);
+          inbox = await createInbox(env.DB, {
+            id: recipientAddress,
+            email: recipientAddress,
+            username: username || "agent",
+            domain: domain || env.DEFAULT_DOMAIN || "cfagentmail.com",
+            displayName: username,
+            metadata: { auto_provisioned: true },
+          });
+        } else {
+          console.warn(`[CFAgentMail Inbound] Inbox not found for ${recipientAddress}. Rejecting.`);
+          message.setReject(`Inbox ${recipientAddress} does not exist.`);
+          return;
+        }
+      }
+
+      // 4. Generate Message & Thread IDs
+      const messageId = `msg_${crypto.randomUUID()}`;
+
+      // 5. Store Raw Email in R2
+      const rawR2Key = await saveRawEmail(env.ATTACHMENTS, inbox.id, messageId, rawBuffer);
+
+      // 6. Create or Match Thread
+      const thread = await getOrCreateThread(
+        env.DB,
+        inbox.id,
+        parsed.subject,
+        parsed.snippet,
+        parsed.inReplyTo,
+        parsed.referencesHeader
+      );
+
+      // 7. Persist Inbound Message to D1 (must be created before attachments due to foreign key)
+      const hasAttachments = parsed.attachments.length > 0;
+      const createdMsg = await createMessage(env.DB, {
+        id: messageId,
+        inboxId: inbox.id,
+        threadId: thread.id,
+        messageIdHeader: parsed.messageIdHeader,
+        inReplyTo: parsed.inReplyTo,
+        referencesHeader: parsed.referencesHeader,
+        fromAddress: parsed.from.email || message.from,
+        fromName: parsed.from.name,
+        toAddresses: parsed.to.length > 0 ? parsed.to : [{ email: message.to }],
+        ccAddresses: parsed.cc.length > 0 ? parsed.cc : undefined,
+        bccAddresses: parsed.bcc.length > 0 ? parsed.bcc : undefined,
+        replyToAddresses: parsed.replyTo.length > 0 ? parsed.replyTo : undefined,
+        subject: parsed.subject,
+        textBody: parsed.text,
+        htmlBody: parsed.html,
+        snippet: parsed.snippet,
+        rawR2Key,
+        hasAttachments,
+        direction: "inbound",
+        isRead: false,
+      });
+
+      // 8. Store Attachments in R2 and insert records in D1
+      if (hasAttachments) {
+        for (const att of parsed.attachments) {
+          const attId = `att_${crypto.randomUUID()}`;
+          const r2Key = await saveAttachment(
+            env.ATTACHMENTS,
+            inbox.id,
+            messageId,
+            attId,
+            att.filename,
+            att.mimeType,
+            att.content
+          );
+
+          await createAttachment(env.DB, {
+            id: attId,
+            messageId,
+            filename: att.filename,
+            contentType: att.mimeType,
+            sizeBytes: att.size,
+            disposition: att.disposition,
+            contentId: att.contentId,
+            r2Key,
+          });
+        }
+      }
+
+      console.log(`[CFAgentMail Inbound] Successfully saved message ${messageId} to inbox ${inbox.id} in thread ${thread.id}`);
+    } catch (error) {
+      console.error("[CFAgentMail Inbound] Error processing incoming email:", error);
+      // In production, log error or send to DLQ
+    }
+  },
+} satisfies ExportedHandler<Env>;
