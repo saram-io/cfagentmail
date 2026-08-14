@@ -38,6 +38,7 @@ apiKeysRouter.post("/:inbox_id/api-keys", async (c) => {
       id: keyId,
       api_key_id: keyId,
       api_key: rawKey,
+      apiKey: rawKey,
       name: parsed.data.name,
       inbox_id: inbox.id,
       created_at: new Date().toISOString(),

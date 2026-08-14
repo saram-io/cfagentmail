@@ -189,6 +189,7 @@ podsRouter.post("/:pod_id/api-keys", async (c) => {
       id: keyId,
       api_key_id: keyId,
       api_key: rawKey,
+      apiKey: rawKey,
       name: parsed.data.name,
       pod_id: pod.id,
       created_at: new Date().toISOString(),

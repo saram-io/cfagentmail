@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cfagentmail"
+version = "0.5.0"
+description = "Official Python SDK for CFAgentMail - Edge-native serverless email for AI agents"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "CFAgentMail Team", email = "support@cfagentmail.com" }
+]
+keywords = ["email", "agentmail", "ai", "agents", "cloudflare", "mcp", "llm", "langchain", "crewai"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "httpx>=0.25.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/saram-io/cfagentmail"
+Repository = "https://github.com/saram-io/cfagentmail"
+Documentation = "https://github.com/saram-io/cfagentmail#readme"

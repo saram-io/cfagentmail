@@ -556,6 +556,106 @@ DELETE /v1/inboxes/support-agent@yourdomain.com/api-keys/key_abcd1234
 
 ---
 
+## Model Context Protocol (MCP) Server
+
+CFAgentMail includes an official Model Context Protocol (MCP) server that enables AI tools and assistants like **Claude Desktop**, **Cursor**, **Claude Code**, **Goose**, **Hermes**, and **Windsurf** to manage agent mailboxes natively.
+
+### 1. Claude Desktop Configuration
+Add the following to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "cfagentmail": {
+      "command": "npx",
+      "args": ["-y", "tsx", "/path/to/cfagentmail/src/mcp/cli.ts"],
+      "env": {
+        "CFAGENTMAIL_API_KEY": "am_live_your_api_key",
+        "CFAGENTMAIL_BASE_URL": "https://api.yourdomain.com/v1"
+      }
+    }
+  }
+}
+```
+
+### 2. Cursor IDE Configuration
+In Cursor Settings > **Features** > **MCP Servers**, add a new server:
+- **Type**: `command`
+- **Command**: `npx -y tsx /path/to/cfagentmail/src/mcp/cli.ts`
+- **Environment Variables**:
+  - `CFAGENTMAIL_API_KEY`: `am_live_your_api_key`
+  - `CFAGENTMAIL_BASE_URL`: `https://api.yourdomain.com/v1`
+
+---
+
+## Official SDKs
+
+### TypeScript / JavaScript SDK
+
+```bash
+npm install cfagentmail
+```
+
+```typescript
+import { CFAgentMail } from "cfagentmail";
+
+const client = new CFAgentMail({
+  apiKey: "am_live_your_api_key",
+  baseUrl: "https://api.yourdomain.com/v1",
+});
+
+// Create an inbox
+const inbox = await client.inboxes.create({
+  username: "support-agent",
+  displayName: "Support Agent",
+});
+
+// Send an email
+const message = await client.messages.send(inbox.id, {
+  to: ["customer@example.com"],
+  subject: "Ticket #1024 Update",
+  text: "Your issue has been resolved.",
+});
+
+// Search threads via FTS5
+const results = await client.threads.search(inbox.id, "resolved");
+console.log(results.threads[0].highlights);
+```
+
+---
+
+### Python SDK
+
+```bash
+pip install cfagentmail
+```
+
+```python
+from cfagentmail import CFAgentMail
+
+client = CFAgentMail(
+    api_key="am_live_your_api_key",
+    base_url="https://api.yourdomain.com/v1"
+)
+
+# Create an inbox
+inbox = client.inboxes.create(username="triage-bot")
+
+# Send message
+msg = client.messages.send(
+    inbox_id=inbox.id,
+    to="client@corp.com",
+    subject="Welcome",
+    text="Welcome aboard!"
+)
+
+# Run AI intelligence
+insight = client.messages.analyze(inbox_id=inbox.id, message_id=msg.id)
+print(f"Summary: {insight.summary}, Urgency: {insight.urgency}/5")
+```
+
+---
+
 ## Production Deployment to Cloudflare
 
 ### 1. Enable Cloudflare Email Sending
@@ -596,7 +696,7 @@ npm run deploy
 - [x] **Phase 2**: Full-Text Search with SQLite FTS5, Conversation Threading, and Drafts / HITL Workflow.
 - [x] **Phase 3**: Real-time WebSockets with Durable Object Hibernation API & HMAC-Signed Webhook Subscriptions.
 - [x] **Phase 4**: Multi-Tenant Pods, Allow/Block Lists, and Workers AI Auto-Labeling.
-- [ ] **Phase 5**: Model Context Protocol (MCP) Server and Official TypeScript / Python SDKs.
+- [x] **Phase 5**: Model Context Protocol (MCP) Server and Official TypeScript / Python SDKs.
 
 ---
 
