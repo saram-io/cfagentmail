@@ -9,17 +9,21 @@ CFAgentMail gives AI agents their own programmable inboxes to send, receive, thr
 ## Features
 
 - 📬 **Programmatic Inboxes**: Provision tens, hundreds, or thousands of agent inboxes on-demand with custom metadata and auto-generated or custom domains.
+- 🏢 **Multi-Tenant Pods**: Group agent fleets and inboxes into isolated organizational workspaces with pod-scoped API key authorization.
 - 📥 **Inbound Email Ingestion**: Native Cloudflare Email Routing handler with full MIME decoding (`postal-mime`), attachment extraction, and automatic inbox auto-provisioning.
 - 📤 **Outbound Email Delivery**: High-deliverability transactional sending via Cloudflare Email Sending (`send_email` binding) with SPF, DKIM, and DMARC.
+- 🛡️ **Access Control Policies**: Inbox and pod-level allowlist/blocklist rules with instant SMTP reject or automated `SPAM` quarantine.
+- 🧠 **Workers AI Email Intelligence**: Automatic 1-sentence summaries, sentiment analysis (`positive`/`neutral`/`negative`), urgency scoring (`1-5`), and smart category auto-labeling.
 - 🧵 **Automatic Conversation Threading**: Group multi-turn messages into threads using RFC 2822 (`Message-ID`, `In-Reply-To`, `References`) headers with subject normalization fallback.
 - 🔍 **SQLite FTS5 Full-Text Search**: Sub-millisecond full-text search across subject and body text with BM25 relevance ranking and keyword highlight snippets (`**term**`).
 - 📝 **Drafts & Human-In-The-Loop (HITL)**: Create, stage, review, and edit email drafts before dispatching via supervisor approval.
 - ⚡ **Real-Time WebSockets**: Zero-idle-cost WebSocket streaming powered by Cloudflare Durable Object Hibernation API (`/v1/inboxes/:id/ws` and `/v1/ws`).
 - 🪝 **HMAC-Signed Webhooks**: Cryptographically verified webhook event dispatching (`email.received`, `email.sent`, `draft.created`, etc.) with delivery tracking.
+- 🤖 **Hermes Agent & Local Tunnels**: Out-of-the-box local webhook bridge connecting local autonomous agents (e.g. Nous Hermes Agent) via Cloudflare Tunnel (`cloudflared`).
 - 📎 **Attachment & Raw EML Storage**: Direct streaming of attachments and raw `.eml` RFC822 files into Cloudflare R2 object storage.
-- 🔑 **Fine-Grained Scoped API Keys**: Issue SHA-256 hashed API keys scoped to individual inboxes to enforce least-privilege access for agent fleets.
+- 🔑 **Fine-Grained Scoped API Keys**: Issue SHA-256 hashed API keys scoped to individual inboxes or pods to enforce least-privilege access for agent fleets.
 - 🛡️ **Idempotent Operations**: Avoid duplicate resource creation and double-sends using `clientId` on inboxes and custom idempotency keys.
-- 🧪 **100% Tested at the Edge**: Comprehensive 29-test suite running directly inside the real `workerd` runtime using `@cloudflare/vitest-pool-workers`.
+- 🧪 **100% Tested at the Edge**: Comprehensive 37-test suite running directly inside the real `workerd` runtime using `@cloudflare/vitest-pool-workers`.
 
 ---
 
