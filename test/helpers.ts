@@ -23,6 +23,7 @@ export const STATEMENTS = [
     snippet TEXT,
     last_message_at INTEGER NOT NULL,
     message_count INTEGER NOT NULL DEFAULT 1,
+    labels TEXT DEFAULT '["INBOX"]',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   )`,
@@ -49,6 +50,7 @@ export const STATEMENTS = [
     raw_r2_key TEXT,
     has_attachments INTEGER NOT NULL DEFAULT 0,
     direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound', 'draft')),
+    labels TEXT DEFAULT '["INBOX"]',
     is_read INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL
   )`,
@@ -81,6 +83,51 @@ export const STATEMENTS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash)`,
   `CREATE INDEX IF NOT EXISTS idx_api_keys_inbox_id ON api_keys(inbox_id)`,
+
+  `CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    message_id UNINDEXED,
+    inbox_id UNINDEXED,
+    thread_id UNINDEXED,
+    subject,
+    body_text,
+    from_address,
+    to_addresses,
+    tokenize = 'porter unicode61'
+  )`,
+
+  `CREATE TRIGGER IF NOT EXISTS trg_messages_ai AFTER INSERT ON messages
+   BEGIN
+     INSERT INTO messages_fts(message_id, inbox_id, thread_id, subject, body_text, from_address, to_addresses)
+     VALUES (
+       new.id,
+       new.inbox_id,
+       new.thread_id,
+       new.subject,
+       COALESCE(new.text_body, ''),
+       new.from_address,
+       new.to_addresses
+     );
+   END`,
+
+  `CREATE TRIGGER IF NOT EXISTS trg_messages_ad AFTER DELETE ON messages
+   BEGIN
+     DELETE FROM messages_fts WHERE message_id = old.id;
+   END`,
+
+  `CREATE TRIGGER IF NOT EXISTS trg_messages_au AFTER UPDATE ON messages
+   BEGIN
+     DELETE FROM messages_fts WHERE message_id = old.id;
+     INSERT INTO messages_fts(message_id, inbox_id, thread_id, subject, body_text, from_address, to_addresses)
+     VALUES (
+       new.id,
+       new.inbox_id,
+       new.thread_id,
+       new.subject,
+       COALESCE(new.text_body, ''),
+       new.from_address,
+       new.to_addresses
+     );
+   END`,
 ];
 
 export async function setupTestDb() {

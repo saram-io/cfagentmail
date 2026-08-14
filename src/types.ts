@@ -19,6 +19,8 @@ export interface Thread {
   snippet: string | null;
   lastMessageAt: number;
   messageCount: number;
+  labels?: string[];
+  messages?: Message[];
   createdAt: number;
   updatedAt: number;
 }
@@ -63,8 +65,27 @@ export interface Message {
   hasAttachments: boolean;
   attachments?: MessageAttachmentMeta[];
   direction: "inbound" | "outbound" | "draft";
+  labels?: string[];
   isRead: boolean;
   createdAt: number;
+}
+
+export interface Draft {
+  id: string;
+  inboxId: string;
+  threadId: string;
+  to: MessageRecipient[];
+  cc?: MessageRecipient[];
+  bcc?: MessageRecipient[];
+  replyTo?: MessageRecipient[];
+  subject: string;
+  text?: string | null;
+  html?: string | null;
+  inReplyTo?: string | null;
+  hasAttachments: boolean;
+  attachments?: MessageAttachmentMeta[];
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface ApiKey {
@@ -73,6 +94,15 @@ export interface ApiKey {
   name: string;
   prefix: string;
   createdAt: number;
+}
+
+// Search Results with Highlights
+export interface ThreadSearchResult extends Thread {
+  highlights?: Record<string, string[]>;
+}
+
+export interface MessageSearchResult extends Message {
+  highlights?: Record<string, string[]>;
 }
 
 // Request / Response payloads
@@ -98,6 +128,7 @@ export interface SendMessageRequest {
   subject: string;
   text?: string;
   html?: string;
+  labels?: string[];
   attachments?: {
     filename: string;
     content: string; // base64 or plain string
@@ -119,6 +150,54 @@ export interface ReplyMessageRequest {
     disposition?: "attachment" | "inline";
     contentId?: string;
   }[];
+}
+
+export interface CreateDraftRequest {
+  to?: string | string[] | MessageRecipient[];
+  cc?: string | string[] | MessageRecipient[];
+  bcc?: string | string[] | MessageRecipient[];
+  replyTo?: string | MessageRecipient;
+  subject?: string;
+  text?: string;
+  html?: string;
+  inReplyTo?: string;
+  threadId?: string;
+  attachments?: {
+    filename: string;
+    content: string;
+    type?: string;
+    disposition?: "attachment" | "inline";
+    contentId?: string;
+  }[];
+}
+
+export interface UpdateDraftRequest {
+  to?: string | string[] | MessageRecipient[];
+  cc?: string | string[] | MessageRecipient[];
+  bcc?: string | string[] | MessageRecipient[];
+  replyTo?: string | MessageRecipient;
+  subject?: string;
+  text?: string;
+  html?: string;
+  attachments?: {
+    filename: string;
+    content: string;
+    type?: string;
+    disposition?: "attachment" | "inline";
+    contentId?: string;
+  }[];
+}
+
+export interface ListThreadsOptions {
+  limit?: number;
+  offset?: number;
+  labels?: string[];
+  senders?: string[];
+  recipients?: string[];
+  subject?: string;
+  before?: number;
+  after?: number;
+  ascending?: boolean;
 }
 
 export interface CreateApiKeyRequest {

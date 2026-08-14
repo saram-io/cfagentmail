@@ -5,10 +5,12 @@ import {
   createMessage,
   getMessage,
   listMessages,
+  updateMessage,
   deleteMessage,
   getOrCreateThread,
   createAttachment,
   getAttachment,
+  searchMessages,
 } from "../db/queries";
 import { sendEmailViaBinding } from "../services/email-sender";
 import { saveAttachment, getAttachmentObject, getRawEmail } from "../services/storage";
@@ -24,6 +26,7 @@ const sendMessageSchema = z.object({
   subject: z.string(),
   text: z.string().optional(),
   html: z.string().optional(),
+  labels: z.array(z.string()).optional(),
   attachments: z
     .array(
       z.object({
@@ -55,6 +58,50 @@ const replyMessageSchema = z.object({
     .optional(),
 });
 
+const updateMessageSchema = z.object({
+  isRead: z.boolean().optional(),
+  labels: z.array(z.string()).optional(),
+});
+
+// GET /v1/inboxes/:inbox_id/messages/search - Full-text search messages
+messagesRouter.get("/:inbox_id/messages/search", async (c) => {
+  const inboxId = c.req.param("inbox_id");
+  const inbox = await getInbox(c.env.DB, inboxId);
+  if (!inbox) {
+    return c.json({ error: { code: "NOT_FOUND", message: "Inbox not found" } }, 404);
+  }
+
+  const q = c.req.query("q") || "";
+  const limitQuery = parseInt(c.req.query("limit") || "20", 10);
+  const limit = Math.min(Math.max(limitQuery, 1), 100);
+  const offset = parseInt(c.req.query("offset") || "0", 10);
+
+  const { results, total } = await searchMessages(c.env.DB, q, inbox.id, limit, offset);
+
+  return c.json({
+    messages: results.map((m) => ({
+      message_id: m.id,
+      id: m.id,
+      inbox_id: m.inboxId,
+      thread_id: m.threadId,
+      from: m.from,
+      to: m.to,
+      cc: m.cc,
+      bcc: m.bcc,
+      subject: m.subject,
+      snippet: m.snippet,
+      has_attachments: m.hasAttachments,
+      direction: m.direction,
+      labels: m.labels,
+      is_read: m.isRead,
+      highlights: m.highlights,
+      created_at: new Date(m.createdAt).toISOString(),
+    })),
+    count: results.length,
+    total,
+  });
+});
+
 // POST /v1/inboxes/:inbox_id/messages - Send email
 messagesRouter.post("/:inbox_id/messages", async (c) => {
   const inboxId = c.req.param("inbox_id");
@@ -75,7 +122,6 @@ messagesRouter.post("/:inbox_id/messages", async (c) => {
     name: inbox.displayName || undefined,
   };
 
-  // Dispatch email via Cloudflare Email Sending
   let outboundResult;
   try {
     outboundResult = await sendEmailViaBinding(c.env.EMAIL, sender, reqData);
@@ -86,14 +132,14 @@ messagesRouter.post("/:inbox_id/messages", async (c) => {
   const messageId = `msg_${crypto.randomUUID()}`;
   const snippet = reqData.text ? reqData.text.slice(0, 160) : reqData.html?.replace(/<[^>]*>?/gm, " ").slice(0, 160) || null;
 
-  // Create or associate thread
   const thread = await getOrCreateThread(
     c.env.DB,
     inbox.id,
     reqData.subject,
     snippet,
     reqData.headers?.["In-Reply-To"],
-    reqData.headers?.["References"]
+    reqData.headers?.["References"],
+    ["INBOX", "SENT"]
   );
 
   const normalizeToArray = (val: any) => {
@@ -111,7 +157,6 @@ messagesRouter.post("/:inbox_id/messages", async (c) => {
   const replyToList = normalizeToArray(reqData.replyTo);
   const hasAttachments = (reqData.attachments?.length || 0) > 0;
 
-  // Persist message record in D1 first (satisfying foreign key constraint)
   const created = await createMessage(c.env.DB, {
     id: messageId,
     inboxId: inbox.id,
@@ -131,10 +176,10 @@ messagesRouter.post("/:inbox_id/messages", async (c) => {
     snippet,
     hasAttachments,
     direction: "outbound",
+    labels: reqData.labels || ["SENT"],
     isRead: true,
   });
 
-  // Save attachments to R2 and insert records in D1
   if (hasAttachments && reqData.attachments) {
     for (const att of reqData.attachments) {
       const attId = `att_${crypto.randomUUID()}`;
@@ -177,6 +222,7 @@ messagesRouter.post("/:inbox_id/messages", async (c) => {
       snippet: created.snippet,
       has_attachments: created.hasAttachments,
       direction: created.direction,
+      labels: created.labels,
       created_at: new Date(created.createdAt).toISOString(),
     },
     201
@@ -211,6 +257,7 @@ messagesRouter.get("/:inbox_id/messages", async (c) => {
       snippet: m.snippet,
       has_attachments: m.hasAttachments,
       direction: m.direction,
+      labels: m.labels,
       is_read: m.isRead,
       created_at: new Date(m.createdAt).toISOString(),
     })),
@@ -263,8 +310,44 @@ messagesRouter.get("/:inbox_id/messages/:message_id", async (c) => {
       content_id: a.contentId,
     })),
     direction: message.direction,
+    labels: message.labels,
     is_read: message.isRead,
     created_at: new Date(message.createdAt).toISOString(),
+  });
+});
+
+// PATCH /v1/inboxes/:inbox_id/messages/:message_id - Update message labels / isRead
+messagesRouter.patch("/:inbox_id/messages/:message_id", async (c) => {
+  const inboxId = c.req.param("inbox_id");
+  const messageId = c.req.param("message_id");
+
+  const inbox = await getInbox(c.env.DB, inboxId);
+  if (!inbox) {
+    return c.json({ error: { code: "NOT_FOUND", message: "Inbox not found" } }, 404);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = updateMessageSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: { code: "VALIDATION_ERROR", message: parsed.error.message } }, 400);
+  }
+
+  const updated = await updateMessage(c.env.DB, messageId, {
+    isRead: parsed.data.isRead,
+    labels: parsed.data.labels,
+  }, inbox.id);
+
+  if (!updated) {
+    return c.json({ error: { code: "NOT_FOUND", message: "Message not found" } }, 404);
+  }
+
+  return c.json({
+    message_id: updated.id,
+    id: updated.id,
+    inbox_id: updated.inboxId,
+    thread_id: updated.threadId,
+    is_read: updated.isRead,
+    labels: updated.labels,
   });
 });
 
@@ -346,7 +429,6 @@ messagesRouter.post("/:inbox_id/messages/:message_id/reply", async (c) => {
     return c.json({ error: { code: "VALIDATION_ERROR", message: parsed.error.message } }, 400);
   }
 
-  // Reply recipient is original sender
   const replyTo = [original.from.email];
   const ccList: string[] = [];
 
@@ -398,8 +480,7 @@ messagesRouter.post("/:inbox_id/messages/:message_id/reply", async (c) => {
   const newMsgId = `msg_${crypto.randomUUID()}`;
   const snippet = parsed.data.text ? parsed.data.text.slice(0, 160) : parsed.data.html?.replace(/<[^>]*>?/gm, " ").slice(0, 160) || null;
 
-  // Persist reply under same thread
-  await getOrCreateThread(c.env.DB, inbox.id, subject, snippet, inReplyTo, references);
+  await getOrCreateThread(c.env.DB, inbox.id, subject, snippet, inReplyTo, references, ["INBOX", "SENT"]);
 
   const created = await createMessage(c.env.DB, {
     id: newMsgId,
@@ -418,6 +499,7 @@ messagesRouter.post("/:inbox_id/messages/:message_id/reply", async (c) => {
     snippet,
     hasAttachments: (parsed.data.attachments?.length || 0) > 0,
     direction: "outbound",
+    labels: ["SENT"],
     isRead: true,
   });
 
@@ -434,6 +516,7 @@ messagesRouter.post("/:inbox_id/messages/:message_id/reply", async (c) => {
       html: created.html,
       snippet: created.snippet,
       direction: created.direction,
+      labels: created.labels,
       created_at: new Date(created.createdAt).toISOString(),
     },
     201

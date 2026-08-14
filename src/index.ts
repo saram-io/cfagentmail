@@ -3,6 +3,8 @@ import { cors } from "hono/cors";
 import { inboxesRouter } from "./routes/inboxes";
 import { messagesRouter } from "./routes/messages";
 import { apiKeysRouter } from "./routes/api-keys";
+import { threadsRouter, orgThreadsRouter } from "./routes/threads";
+import { draftsRouter, orgDraftsRouter } from "./routes/drafts";
 import { authMiddleware } from "./middleware/auth";
 import { parseRawEmail } from "./services/email-parser";
 import { saveRawEmail, saveAttachment } from "./services/storage";
@@ -25,7 +27,7 @@ app.get("/v1/health", (c) => {
     status: "healthy",
     timestamp: new Date().toISOString(),
     service: "cfagentmail",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 });
 
@@ -38,11 +40,23 @@ app.get("/v1/auth/me", authMiddleware, (c) => {
   });
 });
 
-// Mount authenticated API routes
+// Apply auth middleware to all /v1 endpoints
 app.use("/v1/inboxes/*", authMiddleware);
+app.use("/v1/threads/*", authMiddleware);
+app.use("/v1/threads", authMiddleware);
+app.use("/v1/drafts/*", authMiddleware);
+app.use("/v1/drafts", authMiddleware);
+
+// Mount Inbox-scoped routes
 app.route("/v1/inboxes", inboxesRouter);
 app.route("/v1/inboxes", messagesRouter);
+app.route("/v1/inboxes", threadsRouter);
+app.route("/v1/inboxes", draftsRouter);
 app.route("/v1/inboxes", apiKeysRouter);
+
+// Mount Org-wide routes (for supervisor agents)
+app.route("/v1/threads", orgThreadsRouter);
+app.route("/v1/drafts", orgDraftsRouter);
 
 // Global 404 handler
 app.notFound((c) => {
@@ -114,7 +128,8 @@ export default {
         parsed.subject,
         parsed.snippet,
         parsed.inReplyTo,
-        parsed.referencesHeader
+        parsed.referencesHeader,
+        ["INBOX"]
       );
 
       // 7. Persist Inbound Message to D1 (must be created before attachments due to foreign key)
@@ -139,6 +154,7 @@ export default {
         rawR2Key,
         hasAttachments,
         direction: "inbound",
+        labels: ["INBOX"],
         isRead: false,
       });
 
@@ -172,7 +188,6 @@ export default {
       console.log(`[CFAgentMail Inbound] Successfully saved message ${messageId} to inbox ${inbox.id} in thread ${thread.id}`);
     } catch (error) {
       console.error("[CFAgentMail Inbound] Error processing incoming email:", error);
-      // In production, log error or send to DLQ
     }
   },
 } satisfies ExportedHandler<Env>;

@@ -4,9 +4,14 @@ import type {
   Message,
   MessageAttachmentMeta,
   ApiKey,
-  CreateInboxRequest,
+  Draft,
+  ThreadSearchResult,
+  MessageSearchResult,
+  ListThreadsOptions,
   UpdateInboxRequest,
 } from "../types";
+import { saveAttachment } from "../services/storage";
+import { sendEmailViaBinding } from "../services/email-sender";
 
 // Helper for SHA-256 hex digest
 export async function hashApiKey(key: string): Promise<string> {
@@ -199,11 +204,11 @@ export async function getOrCreateThread(
   subject: string,
   snippet: string | null,
   inReplyTo?: string | null,
-  referencesHeader?: string | null
+  referencesHeader?: string | null,
+  labels: string[] = ["INBOX"]
 ): Promise<Thread> {
   const now = Date.now();
 
-  // Try to find matching thread via in_reply_to or references_header in existing messages
   let matchedThreadId: string | null = null;
 
   if (inReplyTo || referencesHeader) {
@@ -232,7 +237,6 @@ export async function getOrCreateThread(
   }
 
   if (matchedThreadId) {
-    // Update existing thread
     await db
       .prepare(
         `UPDATE threads 
@@ -250,14 +254,14 @@ export async function getOrCreateThread(
     return mapThreadRow(threadRow);
   }
 
-  // Create new thread
   const threadId = `th_${crypto.randomUUID()}`;
+  const labelsStr = JSON.stringify(labels);
   await db
     .prepare(
-      `INSERT INTO threads (id, inbox_id, subject, snippet, last_message_at, message_count, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?)`
+      `INSERT INTO threads (id, inbox_id, subject, snippet, last_message_at, message_count, labels, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`
     )
-    .bind(threadId, inboxId, subject || "(no subject)", snippet, now, now, now)
+    .bind(threadId, inboxId, subject || "(no subject)", snippet, now, labelsStr, now, now)
     .run();
 
   return {
@@ -267,6 +271,7 @@ export async function getOrCreateThread(
     snippet,
     lastMessageAt: now,
     messageCount: 1,
+    labels,
     createdAt: now,
     updatedAt: now,
   };
@@ -274,15 +279,148 @@ export async function getOrCreateThread(
 
 export async function getThread(
   db: D1Database,
-  threadId: string
+  threadId: string,
+  inboxId?: string
 ): Promise<Thread | null> {
-  const row = await db
-    .prepare("SELECT * FROM threads WHERE id = ?")
-    .bind(threadId)
-    .first<any>();
+  let query = "SELECT * FROM threads WHERE id = ?";
+  const params: any[] = [threadId];
 
+  if (inboxId) {
+    query += " AND inbox_id = ?";
+    params.push(inboxId);
+  }
+
+  const row = await db.prepare(query).bind(...params).first<any>();
   if (!row) return null;
-  return mapThreadRow(row);
+
+  // Retrieve all messages in this thread in chronological order
+  const msgResults = await db
+    .prepare("SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC")
+    .bind(threadId)
+    .all<any>();
+
+  const messages: Message[] = [];
+  for (const mRow of msgResults.results || []) {
+    const attachments = await listAttachmentsByMessageId(db, mRow.id);
+    const msg = mapMessageRow(mRow);
+    msg.attachments = attachments;
+    messages.push(msg);
+  }
+
+  const thread = mapThreadRow(row);
+  thread.messages = messages;
+  return thread;
+}
+
+export async function listThreads(
+  db: D1Database,
+  inboxId: string | null = null,
+  options: ListThreadsOptions = {}
+): Promise<{ threads: Thread[]; total: number }> {
+  const limit = Math.min(Math.max(options.limit || 20, 1), 100);
+  const offset = Math.max(options.offset || 0, 0);
+  const direction = options.ascending ? "ASC" : "DESC";
+
+  const conditions: string[] = [];
+  const params: any[] = [];
+
+  if (inboxId) {
+    conditions.push("inbox_id = ?");
+    params.push(inboxId);
+  }
+
+  if (options.before) {
+    conditions.push("last_message_at < ?");
+    params.push(options.before);
+  }
+
+  if (options.after) {
+    conditions.push("last_message_at > ?");
+    params.push(options.after);
+  }
+
+  if (options.subject) {
+    conditions.push("subject LIKE ?");
+    params.push(`%${options.subject}%`);
+  }
+
+  if (options.labels && options.labels.length > 0) {
+    // Check if thread contains any of the labels
+    const labelChecks = options.labels.map(() => "labels LIKE ?").join(" OR ");
+    conditions.push(`(${labelChecks})`);
+    options.labels.forEach((l) => params.push(`%"${l}"%`));
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  // Count total
+  const countRow = await db
+    .prepare(`SELECT COUNT(*) as count FROM threads ${whereClause}`)
+    .bind(...params)
+    .first<{ count: number }>();
+  const total = countRow?.count || 0;
+
+  // Query records
+  const query = `
+    SELECT * FROM threads 
+    ${whereClause} 
+    ORDER BY last_message_at ${direction} 
+    LIMIT ? OFFSET ?
+  `;
+  const queryParams = [...params, limit, offset];
+
+  const results = await db.prepare(query).bind(...queryParams).all<any>();
+  const threads = (results.results || []).map(mapThreadRow);
+
+  return { threads, total };
+}
+
+export async function updateThread(
+  db: D1Database,
+  threadId: string,
+  updates: { labels?: string[] },
+  inboxId?: string
+): Promise<Thread | null> {
+  const existing = await getThread(db, threadId, inboxId);
+  if (!existing) return null;
+
+  const now = Date.now();
+  let updatedLabels = existing.labels || ["INBOX"];
+  if (updates.labels !== undefined) {
+    updatedLabels = updates.labels;
+  }
+
+  await db
+    .prepare(
+      `UPDATE threads 
+       SET labels = ?, updated_at = ? 
+       WHERE id = ?`
+    )
+    .bind(JSON.stringify(updatedLabels), now, threadId)
+    .run();
+
+  return {
+    ...existing,
+    labels: updatedLabels,
+    updatedAt: now,
+  };
+}
+
+export async function deleteThread(
+  db: D1Database,
+  threadId: string,
+  inboxId?: string
+): Promise<boolean> {
+  let query = "DELETE FROM threads WHERE id = ?";
+  const params: any[] = [threadId];
+
+  if (inboxId) {
+    query += " AND inbox_id = ?";
+    params.push(inboxId);
+  }
+
+  const res = await db.prepare(query).bind(...params).run();
+  return (res.meta?.changes ?? 0) > 0;
 }
 
 function mapThreadRow(row: any): Thread {
@@ -293,6 +431,7 @@ function mapThreadRow(row: any): Thread {
     snippet: row.snippet,
     lastMessageAt: row.last_message_at,
     messageCount: row.message_count,
+    labels: row.labels ? JSON.parse(row.labels) : ["INBOX"],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -324,20 +463,22 @@ export async function createMessage(
     rawR2Key?: string | null;
     hasAttachments?: boolean;
     direction: "inbound" | "outbound" | "draft";
+    labels?: string[];
     isRead?: boolean;
   }
 ): Promise<Message> {
   const now = Date.now();
   const hasAtt = msg.hasAttachments ? 1 : 0;
   const isRead = msg.isRead ? 1 : 0;
+  const labelsStr = JSON.stringify(msg.labels || (msg.direction === "draft" ? ["DRAFT"] : ["INBOX"]));
 
   await db
     .prepare(
       `INSERT INTO messages (
         id, inbox_id, thread_id, message_id_header, in_reply_to, references_header,
         from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses,
-        subject, text_body, html_body, snippet, raw_r2_key, has_attachments, direction, is_read, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        subject, text_body, html_body, snippet, raw_r2_key, has_attachments, direction, labels, is_read, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       msg.id,
@@ -359,6 +500,7 @@ export async function createMessage(
       msg.rawR2Key || null,
       hasAtt,
       msg.direction,
+      labelsStr,
       isRead,
       now
     )
@@ -386,6 +528,7 @@ export async function createMessage(
     rawR2Key: msg.rawR2Key || null,
     hasAttachments: !!msg.hasAttachments,
     direction: msg.direction,
+    labels: msg.labels || (msg.direction === "draft" ? ["DRAFT"] : ["INBOX"]),
     isRead: !!msg.isRead,
     createdAt: now,
   };
@@ -420,20 +563,55 @@ export async function listMessages(
   offset: number = 0
 ): Promise<{ messages: Message[]; total: number }> {
   const countRow = await db
-    .prepare("SELECT COUNT(*) as count FROM messages WHERE inbox_id = ?")
+    .prepare("SELECT COUNT(*) as count FROM messages WHERE inbox_id = ? AND direction != 'draft'")
     .bind(inboxId)
     .first<{ count: number }>();
   const total = countRow?.count || 0;
 
   const results = await db
     .prepare(
-      "SELECT * FROM messages WHERE inbox_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
+      "SELECT * FROM messages WHERE inbox_id = ? AND direction != 'draft' ORDER BY created_at DESC LIMIT ? OFFSET ?"
     )
     .bind(inboxId, limit, offset)
     .all<any>();
 
   const messages = (results.results || []).map(mapMessageRow);
   return { messages, total };
+}
+
+export async function updateMessage(
+  db: D1Database,
+  messageId: string,
+  updates: { isRead?: boolean; labels?: string[] },
+  inboxId?: string
+): Promise<Message | null> {
+  const existing = await getMessage(db, messageId, inboxId);
+  if (!existing) return null;
+
+  let isRead = existing.isRead;
+  if (updates.isRead !== undefined) {
+    isRead = updates.isRead;
+  }
+
+  let labels = existing.labels || ["INBOX"];
+  if (updates.labels !== undefined) {
+    labels = updates.labels;
+  }
+
+  await db
+    .prepare(
+      `UPDATE messages 
+       SET is_read = ?, labels = ? 
+       WHERE id = ?`
+    )
+    .bind(isRead ? 1 : 0, JSON.stringify(labels), messageId)
+    .run();
+
+  return {
+    ...existing,
+    isRead,
+    labels,
+  };
 }
 
 export async function deleteMessage(
@@ -478,9 +656,500 @@ function mapMessageRow(row: any): Message {
     rawR2Key: row.raw_r2_key,
     hasAttachments: row.has_attachments === 1,
     direction: row.direction,
+    labels: row.labels ? JSON.parse(row.labels) : ["INBOX"],
     isRead: row.is_read === 1,
     createdAt: row.created_at,
   };
+}
+
+// -----------------------------
+// Full-Text Search (SQLite FTS5)
+// -----------------------------
+
+export async function searchMessages(
+  db: D1Database,
+  query: string,
+  inboxId?: string,
+  limit: number = 20,
+  offset: number = 0
+): Promise<{ results: MessageSearchResult[]; total: number }> {
+  // Format query for FTS5 (sanitizing and quoting phrases or terms)
+  const sanitized = query.replace(/[^\w\s@.-]/g, " ").trim();
+  if (!sanitized) {
+    return { results: [], total: 0 };
+  }
+
+  const ftsQuery = sanitized
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((term) => `"${term}"*`)
+    .join(" AND ");
+
+  let countSql = `
+    SELECT COUNT(*) as count 
+    FROM messages_fts 
+    WHERE messages_fts MATCH ?
+  `;
+  const countParams: any[] = [ftsQuery];
+
+  if (inboxId) {
+    countSql = `
+      SELECT COUNT(*) as count 
+      FROM messages_fts 
+      WHERE messages_fts MATCH ? AND inbox_id = ?
+    `;
+    countParams.push(inboxId);
+  }
+
+  const countRow = await db.prepare(countSql).bind(...countParams).first<{ count: number }>();
+  const total = countRow?.count || 0;
+
+  let searchSql = `
+    SELECT 
+      m.*,
+      snippet(messages_fts, 3, '**', '**', '...', 16) as subject_highlight,
+      snippet(messages_fts, 4, '**', '**', '...', 32) as body_highlight,
+      messages_fts.rank
+    FROM messages_fts
+    JOIN messages m ON m.id = messages_fts.message_id
+    WHERE messages_fts MATCH ?
+  `;
+  const searchParams: any[] = [ftsQuery];
+
+  if (inboxId) {
+    searchSql += " AND messages_fts.inbox_id = ?";
+    searchParams.push(inboxId);
+  }
+
+  searchSql += " ORDER BY messages_fts.rank LIMIT ? OFFSET ?";
+  searchParams.push(limit, offset);
+
+  const queryResults = await db.prepare(searchSql).bind(...searchParams).all<any>();
+
+  const results: MessageSearchResult[] = [];
+  for (const row of queryResults.results || []) {
+    const msg = mapMessageRow(row);
+    const attachments = await listAttachmentsByMessageId(db, row.id);
+    msg.attachments = attachments;
+
+    const highlights: Record<string, string[]> = {};
+    if (row.subject_highlight && row.subject_highlight.includes("**")) {
+      highlights.subject = [row.subject_highlight];
+    }
+    if (row.body_highlight && row.body_highlight.includes("**")) {
+      highlights.text = [row.body_highlight];
+    }
+
+    results.push({
+      ...msg,
+      highlights: Object.keys(highlights).length > 0 ? highlights : undefined,
+    });
+  }
+
+  return { results, total };
+}
+
+export async function searchThreads(
+  db: D1Database,
+  query: string,
+  inboxId?: string,
+  limit: number = 20,
+  offset: number = 0
+): Promise<{ results: ThreadSearchResult[]; total: number }> {
+  const sanitized = query.replace(/[^\w\s@.-]/g, " ").trim();
+  if (!sanitized) {
+    return { results: [], total: 0 };
+  }
+
+  const ftsQuery = sanitized
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((term) => `"${term}"*`)
+    .join(" AND ");
+
+  let searchSql = `
+    SELECT 
+      messages_fts.thread_id,
+      messages_fts.message_id,
+      messages_fts.rank,
+      snippet(messages_fts, 3, '**', '**', '...', 16) as subject_highlight,
+      snippet(messages_fts, 4, '**', '**', '...', 32) as body_highlight
+    FROM messages_fts
+    WHERE messages_fts MATCH ?
+  `;
+  const searchParams: any[] = [ftsQuery];
+
+  if (inboxId) {
+    searchSql += " AND messages_fts.inbox_id = ?";
+    searchParams.push(inboxId);
+  }
+
+  searchSql += " ORDER BY messages_fts.rank ASC LIMIT 200";
+
+  const queryResults = await db.prepare(searchSql).bind(...searchParams).all<any>();
+
+  // Aggregate unique thread IDs preserving relevance order
+  const threadMap = new Map<string, { subjectHighlight?: string; bodyHighlight?: string }>();
+  for (const row of queryResults.results || []) {
+    if (!threadMap.has(row.thread_id)) {
+      threadMap.set(row.thread_id, {
+        subjectHighlight: row.subject_highlight,
+        bodyHighlight: row.body_highlight,
+      });
+    }
+  }
+
+  const uniqueThreadIds = Array.from(threadMap.keys());
+  const total = uniqueThreadIds.length;
+  const paginatedIds = uniqueThreadIds.slice(offset, offset + limit);
+
+  const results: ThreadSearchResult[] = [];
+  for (const threadId of paginatedIds) {
+    const thread = await getThread(db, threadId, inboxId);
+    if (!thread) continue;
+
+    const meta = threadMap.get(threadId);
+    const highlights: Record<string, string[]> = {};
+
+    if (meta?.subjectHighlight && meta.subjectHighlight.includes("**")) {
+      highlights.subject = [meta.subjectHighlight];
+    }
+    if (meta?.bodyHighlight && meta.bodyHighlight.includes("**")) {
+      highlights.text = [meta.bodyHighlight];
+    }
+
+    results.push({
+      ...thread,
+      highlights: Object.keys(highlights).length > 0 ? highlights : undefined,
+    });
+  }
+
+  return { results, total };
+}
+
+// -----------------------------
+// Drafts & Human-In-The-Loop
+// -----------------------------
+
+export async function createDraft(
+  db: D1Database,
+  draft: {
+    id: string;
+    inboxId: string;
+    threadId?: string;
+    to: any[];
+    cc?: any[];
+    bcc?: any[];
+    replyTo?: any[];
+    subject?: string;
+    text?: string | null;
+    html?: string | null;
+    inReplyTo?: string | null;
+    hasAttachments?: boolean;
+  }
+): Promise<Draft> {
+  const now = Date.now();
+  const threadId = draft.threadId || `th_${crypto.randomUUID()}`;
+
+  // If thread doesn't exist, create it
+  const existingThread = await db
+    .prepare("SELECT * FROM threads WHERE id = ?")
+    .bind(threadId)
+    .first<any>();
+
+  if (!existingThread) {
+    await db
+      .prepare(
+        `INSERT INTO threads (id, inbox_id, subject, snippet, last_message_at, message_count, labels, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, '["DRAFT"]', ?, ?)`
+      )
+      .bind(
+        threadId,
+        draft.inboxId,
+        draft.subject || "(Draft subject)",
+        draft.text?.slice(0, 160) || null,
+        now,
+        now,
+        now
+      )
+      .run();
+  }
+
+  const inbox = await getInbox(db, draft.inboxId);
+  const fromEmail = inbox?.email || draft.inboxId;
+
+  await db
+    .prepare(
+      `INSERT INTO messages (
+        id, inbox_id, thread_id, in_reply_to, from_address, to_addresses, cc_addresses, bcc_addresses,
+        reply_to_addresses, subject, text_body, html_body, snippet, has_attachments, direction, labels, is_read, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', '["DRAFT"]', 1, ?)`
+    )
+    .bind(
+      draft.id,
+      draft.inboxId,
+      threadId,
+      draft.inReplyTo || null,
+      fromEmail,
+      JSON.stringify(draft.to || []),
+      draft.cc ? JSON.stringify(draft.cc) : null,
+      draft.bcc ? JSON.stringify(draft.bcc) : null,
+      draft.replyTo ? JSON.stringify(draft.replyTo) : null,
+      draft.subject || "(Draft subject)",
+      draft.text || null,
+      draft.html || null,
+      draft.text?.slice(0, 160) || null,
+      draft.hasAttachments ? 1 : 0,
+      now
+    )
+    .run();
+
+  return {
+    id: draft.id,
+    inboxId: draft.inboxId,
+    threadId,
+    to: draft.to,
+    cc: draft.cc,
+    bcc: draft.bcc,
+    replyTo: draft.replyTo,
+    subject: draft.subject || "(Draft subject)",
+    text: draft.text || null,
+    html: draft.html || null,
+    inReplyTo: draft.inReplyTo || null,
+    hasAttachments: !!draft.hasAttachments,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export async function getDraft(
+  db: D1Database,
+  draftId: string,
+  inboxId?: string
+): Promise<Draft | null> {
+  let query = "SELECT * FROM messages WHERE id = ? AND direction = 'draft'";
+  const params: any[] = [draftId];
+
+  if (inboxId) {
+    query += " AND inbox_id = ?";
+    params.push(inboxId);
+  }
+
+  const row = await db.prepare(query).bind(...params).first<any>();
+  if (!row) return null;
+
+  const attachments = await listAttachmentsByMessageId(db, row.id);
+
+  return {
+    id: row.id,
+    inboxId: row.inbox_id,
+    threadId: row.thread_id,
+    to: row.to_addresses ? JSON.parse(row.to_addresses) : [],
+    cc: row.cc_addresses ? JSON.parse(row.cc_addresses) : undefined,
+    bcc: row.bcc_addresses ? JSON.parse(row.bcc_addresses) : undefined,
+    replyTo: row.reply_to_addresses ? JSON.parse(row.reply_to_addresses) : undefined,
+    subject: row.subject,
+    text: row.text_body,
+    html: row.html_body,
+    inReplyTo: row.in_reply_to,
+    hasAttachments: row.has_attachments === 1,
+    attachments,
+    createdAt: row.created_at,
+    updatedAt: row.created_at,
+  };
+}
+
+export async function listDrafts(
+  db: D1Database,
+  inboxId: string | null = null,
+  limit: number = 20,
+  offset: number = 0
+): Promise<{ drafts: Draft[]; total: number }> {
+  let countSql = "SELECT COUNT(*) as count FROM messages WHERE direction = 'draft'";
+  const params: any[] = [];
+
+  if (inboxId) {
+    countSql += " AND inbox_id = ?";
+    params.push(inboxId);
+  }
+
+  const countRow = await db.prepare(countSql).bind(...params).first<{ count: number }>();
+  const total = countRow?.count || 0;
+
+  let query = "SELECT * FROM messages WHERE direction = 'draft'";
+  if (inboxId) {
+    query += " AND inbox_id = ?";
+  }
+  query += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  const queryParams = [...params, limit, offset];
+
+  const results = await db.prepare(query).bind(...queryParams).all<any>();
+
+  const drafts = (results.results || []).map((row) => ({
+    id: row.id,
+    inboxId: row.inbox_id,
+    threadId: row.thread_id,
+    to: row.to_addresses ? JSON.parse(row.to_addresses) : [],
+    cc: row.cc_addresses ? JSON.parse(row.cc_addresses) : undefined,
+    bcc: row.bcc_addresses ? JSON.parse(row.bcc_addresses) : undefined,
+    replyTo: row.reply_to_addresses ? JSON.parse(row.reply_to_addresses) : undefined,
+    subject: row.subject,
+    text: row.text_body,
+    html: row.html_body,
+    inReplyTo: row.in_reply_to,
+    hasAttachments: row.has_attachments === 1,
+    createdAt: row.created_at,
+    updatedAt: row.created_at,
+  }));
+
+  return { drafts, total };
+}
+
+export async function updateDraft(
+  db: D1Database,
+  draftId: string,
+  updates: {
+    to?: any[];
+    cc?: any[];
+    bcc?: any[];
+    replyTo?: any[];
+    subject?: string;
+    text?: string | null;
+    html?: string | null;
+  },
+  inboxId?: string
+): Promise<Draft | null> {
+  const existing = await getDraft(db, draftId, inboxId);
+  if (!existing) return null;
+
+  const now = Date.now();
+  const to = updates.to !== undefined ? updates.to : existing.to;
+  const cc = updates.cc !== undefined ? updates.cc : existing.cc;
+  const bcc = updates.bcc !== undefined ? updates.bcc : existing.bcc;
+  const replyTo = updates.replyTo !== undefined ? updates.replyTo : existing.replyTo;
+  const subject = updates.subject !== undefined ? updates.subject : existing.subject;
+  const text = updates.text !== undefined ? updates.text : existing.text;
+  const html = updates.html !== undefined ? updates.html : existing.html;
+  const snippet = text ? text.slice(0, 160) : null;
+
+  await db
+    .prepare(
+      `UPDATE messages 
+       SET to_addresses = ?, cc_addresses = ?, bcc_addresses = ?, reply_to_addresses = ?,
+           subject = ?, text_body = ?, html_body = ?, snippet = ?
+       WHERE id = ? AND direction = 'draft'`
+    )
+    .bind(
+      JSON.stringify(to || []),
+      cc ? JSON.stringify(cc) : null,
+      bcc ? JSON.stringify(bcc) : null,
+      replyTo ? JSON.stringify(replyTo) : null,
+      subject,
+      text,
+      html,
+      snippet,
+      draftId
+    )
+    .run();
+
+  return {
+    ...existing,
+    to,
+    cc,
+    bcc,
+    replyTo,
+    subject,
+    text,
+    html,
+    updatedAt: now,
+  };
+}
+
+export async function sendDraft(
+  db: D1Database,
+  emailBinding: SendEmail,
+  draftId: string,
+  inboxId?: string
+): Promise<Message> {
+  const draft = await getDraft(db, draftId, inboxId);
+  if (!draft) {
+    throw new Error("Draft not found");
+  }
+
+  const inbox = await getInbox(db, draft.inboxId);
+  if (!inbox) {
+    throw new Error("Associated inbox not found");
+  }
+
+  const sender = {
+    email: inbox.email,
+    name: inbox.displayName || undefined,
+  };
+
+  const extraHeaders: Record<string, string> = {};
+  if (draft.inReplyTo) {
+    extraHeaders["In-Reply-To"] = draft.inReplyTo;
+    extraHeaders["References"] = draft.inReplyTo;
+  }
+
+  // Dispatch email via Cloudflare Email Sending
+  const outboundResult = await sendEmailViaBinding(
+    emailBinding,
+    sender,
+    {
+      to: draft.to,
+      cc: draft.cc,
+      bcc: draft.bcc,
+      replyTo: draft.replyTo?.[0]?.email,
+      subject: draft.subject,
+      text: draft.text || undefined,
+      html: draft.html || undefined,
+    },
+    extraHeaders
+  );
+
+  const now = Date.now();
+  const messageIdHeader = outboundResult.messageId ? `<${outboundResult.messageId}>` : null;
+
+  // Convert message status from draft to outbound
+  await db
+    .prepare(
+      `UPDATE messages 
+       SET direction = 'outbound', labels = '["SENT"]', message_id_header = ?
+       WHERE id = ?`
+    )
+    .bind(messageIdHeader, draftId)
+    .run();
+
+  // Update thread
+  await db
+    .prepare(
+      `UPDATE threads 
+       SET last_message_at = ?, labels = '["INBOX", "SENT"]', updated_at = ? 
+       WHERE id = ?`
+    )
+    .bind(now, now, draft.threadId)
+    .run();
+
+  const msg = await getMessage(db, draftId, inbox.id);
+  return msg!;
+}
+
+export async function deleteDraft(
+  db: D1Database,
+  draftId: string,
+  inboxId?: string
+): Promise<boolean> {
+  let query = "DELETE FROM messages WHERE id = ? AND direction = 'draft'";
+  const params: any[] = [draftId];
+
+  if (inboxId) {
+    query += " AND inbox_id = ?";
+    params.push(inboxId);
+  }
+
+  const res = await db.prepare(query).bind(...params).run();
+  return (res.meta?.changes ?? 0) > 0;
 }
 
 // -----------------------------

@@ -225,6 +225,85 @@ GET /v1/inboxes/support-agent@yourdomain.com/messages/msg_12345/raw
 
 ---
 
+### Threads & Full-Text Search
+
+#### Search Threads (FTS5 with Highlights)
+```http
+GET /v1/inboxes/support-agent@yourdomain.com/threads/search?q=invoice
+```
+*Response (`200 OK`):*
+```json
+{
+  "threads": [
+    {
+      "thread_id": "th_12345",
+      "id": "th_12345",
+      "inbox_id": "support-agent@yourdomain.com",
+      "subject": "Quarterly Invoice INV-2026-Q3",
+      "snippet": "Please find attached your invoice...",
+      "last_message_at": "2026-08-14T12:00:00.000Z",
+      "message_count": 2,
+      "labels": ["INBOX"],
+      "highlights": {
+        "subject": ["Quarterly **Invoice** INV-2026-Q3"],
+        "text": ["Please find attached your **invoice** for services..."]
+      }
+    }
+  ],
+  "count": 1,
+  "total": 1
+}
+```
+
+#### Org-Wide Search Threads
+```http
+GET /v1/threads/search?q=migration
+```
+
+#### List Threads (with Filters)
+```http
+GET /v1/inboxes/support-agent@yourdomain.com/threads?limit=20&labels=INBOX,IMPORTANT&ascending=false
+```
+
+#### Get Thread (Chronological Message Tree)
+```http
+GET /v1/inboxes/support-agent@yourdomain.com/threads/th_12345
+```
+
+---
+
+### Drafts (Human-In-The-Loop)
+
+#### Create Draft
+```http
+POST /v1/inboxes/support-agent@yourdomain.com/drafts
+Content-Type: application/json
+
+{
+  "to": ["client@example.com"],
+  "subject": "Discount Proposal",
+  "text": "Proposed 15% discount for annual contract."
+}
+```
+
+#### Update Draft (HITL Review / Editing)
+```http
+PATCH /v1/inboxes/support-agent@yourdomain.com/drafts/draft_12345
+Content-Type: application/json
+
+{
+  "subject": "Approved Discount Proposal",
+  "text": "Approved 20% discount for annual contract."
+}
+```
+
+#### Send Draft (Execution)
+```http
+POST /v1/inboxes/support-agent@yourdomain.com/drafts/draft_12345/send
+```
+
+---
+
 ### API Keys
 
 #### Create Inbox-Scoped API Key
@@ -297,7 +376,7 @@ npm run deploy
 ## Roadmap
 
 - [x] **Phase 1**: Core Mailbox & Ingestion Engine (D1 schema, Email Routing handler, Email Sending binding, R2 storage, REST API).
-- [ ] **Phase 2**: Full-Text Search with SQLite FTS5 & Drafts / HITL Workflow.
+- [x] **Phase 2**: Full-Text Search with SQLite FTS5, Conversation Threading, and Drafts / HITL Workflow.
 - [ ] **Phase 3**: Real-time WebSockets with Durable Object Hibernation API & Cloudflare Queues for Webhooks.
 - [ ] **Phase 4**: Multi-Tenant Pods, Allow/Block Lists, and Workers AI Auto-Labeling.
 - [ ] **Phase 5**: Model Context Protocol (MCP) Server and Official TypeScript / Python SDKs.
