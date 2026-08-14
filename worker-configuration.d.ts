@@ -7,4 +7,5 @@ interface Env {
 	ATTACHMENTS: R2Bucket;
 	DB: D1Database;
 	EMAIL: SendEmail;
+	AI: Ai;
 }

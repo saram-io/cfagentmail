@@ -13,6 +13,12 @@ import type {
   WebhookDelivery,
   CreateWebhookRequest,
   UpdateWebhookRequest,
+  Pod,
+  AccessRule,
+  AiInsight,
+  CreatePodRequest,
+  UpdatePodRequest,
+  CreateAccessRuleRequest,
 } from "../types";
 import { saveAttachment } from "../services/storage";
 import { sendEmailViaBinding } from "../services/email-sender";
@@ -37,6 +43,7 @@ export async function createInbox(
     email: string;
     username: string;
     domain: string;
+    podId?: string | null;
     displayName?: string | null;
     metadata?: Record<string, any> | null;
     clientId?: string | null;
@@ -59,11 +66,12 @@ export async function createInbox(
 
   await db
     .prepare(
-      `INSERT INTO inboxes (id, email, username, domain, display_name, metadata, client_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO inboxes (id, pod_id, email, username, domain, display_name, metadata, client_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       data.id,
+      data.podId || null,
       data.email.toLowerCase(),
       data.username.toLowerCase(),
       data.domain.toLowerCase(),
@@ -77,6 +85,7 @@ export async function createInbox(
 
   return {
     id: data.id,
+    podId: data.podId || null,
     email: data.email.toLowerCase(),
     username: data.username.toLowerCase(),
     domain: data.domain.toLowerCase(),
@@ -156,18 +165,24 @@ export async function updateInbox(
     Object.keys(updatedMetadata).length > 0 ? updatedMetadata : null;
   const metadataStr = finalMetadata ? JSON.stringify(finalMetadata) : null;
 
+  let updatedPodId = existing.podId;
+  if (updates.podId !== undefined) {
+    updatedPodId = updates.podId;
+  }
+
   await db
     .prepare(
       `UPDATE inboxes 
-       SET display_name = ?, metadata = ?, updated_at = ?
+       SET display_name = ?, pod_id = ?, metadata = ?, updated_at = ?
        WHERE id = ?`
     )
-    .bind(updatedDisplayName, metadataStr, now, existing.id)
+    .bind(updatedDisplayName, updatedPodId || null, metadataStr, now, existing.id)
     .run();
 
   return {
     ...existing,
     displayName: updatedDisplayName,
+    podId: updatedPodId || null,
     metadata: finalMetadata,
     updatedAt: now,
   };
@@ -187,6 +202,7 @@ export async function deleteInbox(
 function mapInboxRow(row: any): Inbox {
   return {
     id: row.id,
+    podId: row.pod_id || null,
     email: row.email,
     username: row.username,
     domain: row.domain,
@@ -1257,7 +1273,8 @@ export async function listAttachmentsByMessageId(
 export async function createApiKeyRecord(
   db: D1Database,
   name: string,
-  inboxId: string | null = null
+  inboxId: string | null = null,
+  podId: string | null = null
 ): Promise<{ keyId: string; rawKey: string }> {
   const keyId = `key_${crypto.randomUUID()}`;
   const randomBytes = new Uint8Array(24);
@@ -1273,10 +1290,10 @@ export async function createApiKeyRecord(
 
   await db
     .prepare(
-      `INSERT INTO api_keys (id, inbox_id, name, key_hash, prefix, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO api_keys (id, inbox_id, pod_id, name, key_hash, prefix, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
-    .bind(keyId, inboxId, name, keyHash, prefix, now)
+    .bind(keyId, inboxId, podId, name, keyHash, prefix, now)
     .run();
 
   return { keyId, rawKey };
@@ -1296,6 +1313,7 @@ export async function verifyApiKey(
   return {
     id: row.id,
     inboxId: row.inbox_id,
+    podId: row.pod_id,
     name: row.name,
     prefix: row.prefix,
     createdAt: row.created_at,
@@ -1314,6 +1332,7 @@ export async function listApiKeysByInbox(
   return (results.results || []).map((row) => ({
     id: row.id,
     inboxId: row.inbox_id,
+    podId: row.pod_id,
     name: row.name,
     prefix: row.prefix,
     createdAt: row.created_at,
@@ -1592,5 +1611,353 @@ function mapWebhookRow(row: any): Webhook {
     isActive: row.is_active === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+// -----------------------------
+// Pods (Multi-Tenant Isolation)
+// -----------------------------
+
+export async function createPodRecord(
+  db: D1Database,
+  data: {
+    id: string;
+    name: string;
+    metadata?: Record<string, any> | null;
+  }
+): Promise<Pod> {
+  const now = Date.now();
+  const metaStr = data.metadata ? JSON.stringify(data.metadata) : null;
+
+  await db
+    .prepare(
+      `INSERT INTO pods (id, name, metadata, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .bind(data.id, data.name, metaStr, now, now)
+    .run();
+
+  return {
+    id: data.id,
+    name: data.name,
+    metadata: data.metadata || null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export async function getPodRecord(
+  db: D1Database,
+  podId: string
+): Promise<Pod | null> {
+  const row = await db
+    .prepare("SELECT * FROM pods WHERE id = ?")
+    .bind(podId)
+    .first<any>();
+
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    metadata: row.metadata ? JSON.parse(row.metadata) : null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function listPodsRecord(
+  db: D1Database,
+  limit: number = 50,
+  offset: number = 0
+): Promise<{ pods: Pod[]; total: number }> {
+  const countRow = await db.prepare("SELECT COUNT(*) as count FROM pods").first<{ count: number }>();
+  const total = countRow?.count || 0;
+
+  const results = await db
+    .prepare("SELECT * FROM pods ORDER BY created_at DESC LIMIT ? OFFSET ?")
+    .bind(limit, offset)
+    .all<any>();
+
+  const pods = (results.results || []).map((row) => ({
+    id: row.id,
+    name: row.name,
+    metadata: row.metadata ? JSON.parse(row.metadata) : null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+
+  return { pods, total };
+}
+
+export async function updatePodRecord(
+  db: D1Database,
+  podId: string,
+  updates: UpdatePodRequest
+): Promise<Pod | null> {
+  const existing = await getPodRecord(db, podId);
+  if (!existing) return null;
+
+  const now = Date.now();
+  let updatedName = existing.name;
+  if (updates.name !== undefined) {
+    updatedName = updates.name;
+  }
+
+  let updatedMetadata = existing.metadata ? { ...existing.metadata } : {};
+  if (updates.metadata === null) {
+    updatedMetadata = {};
+  } else if (updates.metadata !== undefined) {
+    for (const [k, v] of Object.entries(updates.metadata)) {
+      if (v === null) delete updatedMetadata[k];
+      else updatedMetadata[k] = v;
+    }
+  }
+
+  const finalMetadata = Object.keys(updatedMetadata).length > 0 ? updatedMetadata : null;
+  const metaStr = finalMetadata ? JSON.stringify(finalMetadata) : null;
+
+  await db
+    .prepare(
+      `UPDATE pods 
+       SET name = ?, metadata = ?, updated_at = ? 
+       WHERE id = ?`
+    )
+    .bind(updatedName, metaStr, now, podId)
+    .run();
+
+  return {
+    ...existing,
+    name: updatedName,
+    metadata: finalMetadata,
+    updatedAt: now,
+  };
+}
+
+export async function deletePodRecord(
+  db: D1Database,
+  podId: string
+): Promise<boolean> {
+  const res = await db.prepare("DELETE FROM pods WHERE id = ?").bind(podId).run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+export async function listInboxesByPodRecord(
+  db: D1Database,
+  podId: string,
+  limit: number = 50,
+  offset: number = 0
+): Promise<{ inboxes: Inbox[]; total: number }> {
+  const countRow = await db
+    .prepare("SELECT COUNT(*) as count FROM inboxes WHERE pod_id = ?")
+    .bind(podId)
+    .first<{ count: number }>();
+  const total = countRow?.count || 0;
+
+  const results = await db
+    .prepare("SELECT * FROM inboxes WHERE pod_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?")
+    .bind(podId, limit, offset)
+    .all<any>();
+
+  const inboxes = (results.results || []).map(mapInboxRow);
+  return { inboxes, total };
+}
+
+// -----------------------------
+// Access Rules (Allow / Block Lists)
+// -----------------------------
+
+export async function createAccessRuleRecord(
+  db: D1Database,
+  data: {
+    id: string;
+    inboxId?: string | null;
+    podId?: string | null;
+    ruleType: "allow" | "block";
+    pattern: string;
+    action?: "reject" | "spam";
+  }
+): Promise<AccessRule> {
+  const now = Date.now();
+  const action = data.action || (data.ruleType === "allow" ? "reject" : "reject");
+
+  await db
+    .prepare(
+      `INSERT INTO access_rules (id, inbox_id, pod_id, rule_type, pattern, action, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(
+      data.id,
+      data.inboxId || null,
+      data.podId || null,
+      data.ruleType,
+      data.pattern.toLowerCase().trim(),
+      action,
+      now
+    )
+    .run();
+
+  return {
+    id: data.id,
+    inboxId: data.inboxId || null,
+    podId: data.podId || null,
+    ruleType: data.ruleType,
+    pattern: data.pattern.toLowerCase().trim(),
+    action,
+    createdAt: now,
+  };
+}
+
+export async function listAccessRules(
+  db: D1Database,
+  inboxId?: string | null,
+  podId?: string | null
+): Promise<AccessRule[]> {
+  let query = "SELECT * FROM access_rules WHERE 1=1";
+  const params: any[] = [];
+
+  if (inboxId) {
+    query += " AND (inbox_id = ? OR inbox_id IS NULL)";
+    params.push(inboxId);
+  }
+
+  if (podId) {
+    query += " AND (pod_id = ? OR pod_id IS NULL)";
+    params.push(podId);
+  }
+
+  query += " ORDER BY created_at DESC";
+
+  const results = await db.prepare(query).bind(...params).all<any>();
+
+  return (results.results || []).map((row) => ({
+    id: row.id,
+    inboxId: row.inbox_id,
+    podId: row.pod_id,
+    ruleType: row.rule_type,
+    pattern: row.pattern,
+    action: row.action,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function listAccessRulesForInbox(
+  db: D1Database,
+  inboxId: string,
+  podId?: string | null
+): Promise<AccessRule[]> {
+  let query = "SELECT * FROM access_rules WHERE (inbox_id = ? OR inbox_id IS NULL)";
+  const params: any[] = [inboxId];
+
+  if (podId) {
+    query += " OR pod_id = ?";
+    params.push(podId);
+  }
+
+  query += " ORDER BY created_at DESC";
+
+  const results = await db.prepare(query).bind(...params).all<any>();
+
+  return (results.results || []).map((row) => ({
+    id: row.id,
+    inboxId: row.inbox_id,
+    podId: row.pod_id,
+    ruleType: row.rule_type,
+    pattern: row.pattern,
+    action: row.action,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function deleteAccessRuleRecord(
+  db: D1Database,
+  ruleId: string,
+  inboxId?: string
+): Promise<boolean> {
+  let query = "DELETE FROM access_rules WHERE id = ?";
+  const params: any[] = [ruleId];
+
+  if (inboxId) {
+    query += " AND (inbox_id = ? OR inbox_id IS NULL)";
+    params.push(inboxId);
+  }
+
+  const res = await db.prepare(query).bind(...params).run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+// -----------------------------
+// AI Insights
+// -----------------------------
+
+export async function saveAiInsightRecord(
+  db: D1Database,
+  data: {
+    id: string;
+    messageId: string;
+    summary: string;
+    sentiment: "positive" | "neutral" | "negative";
+    urgency: number;
+    labels: string[];
+    actionItem?: string | null;
+  }
+): Promise<AiInsight> {
+  const now = Date.now();
+  const labelsStr = JSON.stringify(data.labels || []);
+
+  await db
+    .prepare(
+      `INSERT INTO ai_insights (id, message_id, summary, sentiment, urgency, labels, action_item, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(message_id) DO UPDATE SET
+         summary = excluded.summary,
+         sentiment = excluded.sentiment,
+         urgency = excluded.urgency,
+         labels = excluded.labels,
+         action_item = excluded.action_item`
+    )
+    .bind(
+      data.id,
+      data.messageId,
+      data.summary,
+      data.sentiment,
+      data.urgency,
+      labelsStr,
+      data.actionItem || null,
+      now
+    )
+    .run();
+
+  return {
+    id: data.id,
+    messageId: data.messageId,
+    summary: data.summary,
+    sentiment: data.sentiment,
+    urgency: data.urgency,
+    labels: data.labels,
+    actionItem: data.actionItem || null,
+    createdAt: now,
+  };
+}
+
+export async function getAiInsightRecord(
+  db: D1Database,
+  messageId: string
+): Promise<AiInsight | null> {
+  const row = await db
+    .prepare("SELECT * FROM ai_insights WHERE message_id = ?")
+    .bind(messageId)
+    .first<any>();
+
+  if (!row) return null;
+
+  return {
+    id: row.id,
+    messageId: row.message_id,
+    summary: row.summary,
+    sentiment: row.sentiment,
+    urgency: row.urgency,
+    labels: row.labels ? JSON.parse(row.labels) : [],
+    actionItem: row.action_item,
+    createdAt: row.created_at,
   };
 }

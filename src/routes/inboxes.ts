@@ -13,6 +13,7 @@ const inboxesRouter = new Hono<{ Bindings: Env }>();
 const createInboxSchema = z.object({
   username: z.string().min(1).max(64).optional(),
   domain: z.string().min(1).max(255).optional(),
+  podId: z.string().optional(),
   displayName: z.string().max(255).optional(),
   metadata: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
   clientId: z.string().max(255).optional(),
@@ -20,6 +21,7 @@ const createInboxSchema = z.object({
 
 const updateInboxSchema = z.object({
   displayName: z.string().max(255).optional(),
+  podId: z.string().nullable().optional(),
   metadata: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).nullable().optional(),
 });
 
@@ -53,6 +55,7 @@ inboxesRouter.post("/", async (c) => {
     email,
     username,
     domain,
+    podId: parsed.data.podId || null,
     displayName: parsed.data.displayName || null,
     metadata: parsed.data.metadata || null,
     clientId: parsed.data.clientId || null,
@@ -62,6 +65,7 @@ inboxesRouter.post("/", async (c) => {
     {
       inbox_id: inbox.id,
       id: inbox.id,
+      pod_id: inbox.podId,
       email: inbox.email,
       username: inbox.username,
       domain: inbox.domain,
@@ -86,6 +90,7 @@ inboxesRouter.get("/", async (c) => {
     inboxes: inboxes.map((inbox) => ({
       inbox_id: inbox.id,
       id: inbox.id,
+      pod_id: inbox.podId,
       email: inbox.email,
       username: inbox.username,
       domain: inbox.domain,
@@ -112,6 +117,7 @@ inboxesRouter.get("/:inbox_id", async (c) => {
   return c.json({
     inbox_id: inbox.id,
     id: inbox.id,
+    pod_id: inbox.podId,
     email: inbox.email,
     username: inbox.username,
     domain: inbox.domain,
@@ -134,6 +140,7 @@ inboxesRouter.patch("/:inbox_id", async (c) => {
 
   const updated = await updateInbox(c.env.DB, inboxId, {
     displayName: parsed.data.displayName,
+    podId: parsed.data.podId,
     metadata: parsed.data.metadata,
   });
 
@@ -144,6 +151,7 @@ inboxesRouter.patch("/:inbox_id", async (c) => {
   return c.json({
     inbox_id: updated.id,
     id: updated.id,
+    pod_id: updated.podId,
     email: updated.email,
     username: updated.username,
     domain: updated.domain,

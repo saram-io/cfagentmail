@@ -6,16 +6,22 @@ import { apiKeysRouter } from "./routes/api-keys";
 import { threadsRouter, orgThreadsRouter } from "./routes/threads";
 import { draftsRouter, orgDraftsRouter } from "./routes/drafts";
 import { webhooksRouter } from "./routes/webhooks";
+import { podsRouter } from "./routes/pods";
+import { rulesRouter } from "./routes/rules";
 import { authMiddleware } from "./middleware/auth";
 import { parseRawEmail } from "./services/email-parser";
 import { saveRawEmail, saveAttachment } from "./services/storage";
 import { emitEvent } from "./services/realtime-notifier";
+import { evaluateAccessPolicy } from "./services/access-controller";
+import { analyzeEmailContent } from "./services/ai-classifier";
 import {
   getInbox,
   createInbox,
   getOrCreateThread,
   createMessage,
   createAttachment,
+  saveAiInsightRecord,
+  updateMessage,
 } from "./db/queries";
 
 // Export Durable Object class so Cloudflare Workers runtime can instantiate it
@@ -32,7 +38,7 @@ app.get("/v1/health", (c) => {
     status: "healthy",
     timestamp: new Date().toISOString(),
     service: "cfagentmail",
-    version: "0.3.0",
+    version: "0.4.0",
   });
 });
 
@@ -82,6 +88,8 @@ app.use("/v1/drafts/*", authMiddleware);
 app.use("/v1/drafts", authMiddleware);
 app.use("/v1/webhooks/*", authMiddleware);
 app.use("/v1/webhooks", authMiddleware);
+app.use("/v1/pods/*", authMiddleware);
+app.use("/v1/pods", authMiddleware);
 
 // Mount Inbox-scoped routes
 app.route("/v1/inboxes", inboxesRouter);
@@ -89,11 +97,13 @@ app.route("/v1/inboxes", messagesRouter);
 app.route("/v1/inboxes", threadsRouter);
 app.route("/v1/inboxes", draftsRouter);
 app.route("/v1/inboxes", apiKeysRouter);
+app.route("/v1/inboxes", rulesRouter);
 
-// Mount Org-wide routes (for supervisor agents)
+// Mount Org-wide / Pod routes (for supervisor agents)
 app.route("/v1/threads", orgThreadsRouter);
 app.route("/v1/drafts", orgDraftsRouter);
 app.route("/v1/webhooks", webhooksRouter);
+app.route("/v1/pods", podsRouter);
 
 // Global 404 handler
 app.notFound((c) => {
@@ -152,13 +162,24 @@ export default {
         }
       }
 
-      // 4. Generate Message & Thread IDs
+      // 4. Access Policy Evaluation (Allowlist & Blocklist)
+      const policy = await evaluateAccessPolicy(env.DB, inbox.id, inbox.podId, message.from);
+      if (!policy.allowed || policy.action === "reject") {
+        console.warn(`[CFAgentMail Inbound] Message from ${message.from} rejected by policy: ${policy.reason}`);
+        message.setReject(policy.reason || "Rejected by inbox security policy.");
+        return;
+      }
+
+      const isSpam = policy.action === "spam";
+      const initialLabels = isSpam ? ["SPAM"] : ["INBOX"];
+
+      // 5. Generate Message & Thread IDs
       const messageId = `msg_${crypto.randomUUID()}`;
 
-      // 5. Store Raw Email in R2
+      // 6. Store Raw Email in R2
       const rawR2Key = await saveRawEmail(env.ATTACHMENTS, inbox.id, messageId, rawBuffer);
 
-      // 6. Create or Match Thread
+      // 7. Create or Match Thread
       const thread = await getOrCreateThread(
         env.DB,
         inbox.id,
@@ -166,10 +187,10 @@ export default {
         parsed.snippet,
         parsed.inReplyTo,
         parsed.referencesHeader,
-        ["INBOX"]
+        initialLabels
       );
 
-      // 7. Persist Inbound Message to D1 (must be created before attachments due to foreign key)
+      // 8. Persist Inbound Message to D1 (must be created before attachments due to foreign key)
       const hasAttachments = parsed.attachments.length > 0;
       const createdMsg = await createMessage(env.DB, {
         id: messageId,
@@ -191,11 +212,11 @@ export default {
         rawR2Key,
         hasAttachments,
         direction: "inbound",
-        labels: ["INBOX"],
-        isRead: false,
+        labels: initialLabels,
+        isRead: isSpam,
       });
 
-      // 8. Store Attachments in R2 and insert records in D1
+      // 9. Store Attachments in R2 and insert records in D1
       if (hasAttachments) {
         for (const att of parsed.attachments) {
           const attId = `att_${crypto.randomUUID()}`;
@@ -222,9 +243,33 @@ export default {
         }
       }
 
+      // 10. AI Auto-Labeling and Intelligence Analysis
+      if (!isSpam) {
+        const analysis = await analyzeEmailContent(
+          (env as any).AI,
+          parsed.subject,
+          parsed.text || parsed.snippet || ""
+        );
+
+        const insightId = `ai_${crypto.randomUUID()}`;
+        await saveAiInsightRecord(env.DB, {
+          id: insightId,
+          messageId: createdMsg.id,
+          summary: analysis.summary,
+          sentiment: analysis.sentiment,
+          urgency: analysis.urgency,
+          labels: analysis.labels,
+          actionItem: analysis.actionItem,
+        });
+
+        // Merge AI discovered labels onto message
+        const mergedLabels = Array.from(new Set([...initialLabels, ...analysis.labels]));
+        await updateMessage(env.DB, createdMsg.id, { labels: mergedLabels }, inbox.id);
+      }
+
       console.log(`[CFAgentMail Inbound] Successfully saved message ${messageId} to inbox ${inbox.id} in thread ${thread.id}`);
 
-      // 9. Emit real-time WebSocket and Webhook events
+      // 11. Emit real-time WebSocket and Webhook events
       await emitEvent(
         env,
         "email.received",

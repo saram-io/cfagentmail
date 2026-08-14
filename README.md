@@ -315,6 +315,100 @@ POST /v1/inboxes/support-agent@yourdomain.com/drafts/draft_12345/send
 
 ---
 
+### Multi-Tenant Pods
+
+Pods provide workspace-level and tenant-level isolation for grouping inboxes, threads, and API keys.
+
+#### Create Pod
+```http
+POST /v1/pods
+Content-Type: application/json
+
+{
+  "name": "Acme Corp Fleet",
+  "metadata": {
+    "tier": "enterprise",
+    "region": "us-east"
+  }
+}
+```
+
+#### List Inboxes in Pod
+```http
+GET /v1/pods/pod_12345/inboxes
+```
+
+#### Create Pod-Scoped API Key
+```http
+POST /v1/pods/pod_12345/api-keys
+Content-Type: application/json
+
+{
+  "name": "Fleet Agent Supervisor Key"
+}
+```
+
+---
+
+### Access Rules & Policies (Allow / Block Lists)
+
+Protect agent inboxes from unwanted senders, spam, or restrict communication to trusted partners.
+
+#### Create Allowlist Rule (Only allow specific domain)
+```http
+POST /v1/inboxes/support-agent@yourdomain.com/rules
+Content-Type: application/json
+
+{
+  "ruleType": "allow",
+  "pattern": "@trustedpartner.com"
+}
+```
+
+#### Create Blocklist Rule (Reject spammers or tag as SPAM)
+```http
+POST /v1/inboxes/support-agent@yourdomain.com/rules
+Content-Type: application/json
+
+{
+  "ruleType": "block",
+  "pattern": "*@spammarketing.org",
+  "action": "spam"
+}
+```
+
+---
+
+### Workers AI Auto-Labeling & Email Intelligence
+
+Extract actionable intelligence, summaries, sentiment, and categories automatically using Cloudflare Workers AI.
+
+#### Trigger On-Demand AI Analysis
+```http
+POST /v1/inboxes/support-agent@yourdomain.com/messages/msg_12345/analyze
+```
+*Response (`200 OK`):*
+```json
+{
+  "insight_id": "ai_98765",
+  "id": "ai_98765",
+  "message_id": "msg_12345",
+  "summary": "Customer requesting urgent invoice adjustment for billing dispute.",
+  "sentiment": "negative",
+  "urgency": 5,
+  "labels": ["URGENT", "BILLING"],
+  "action_item": "Verify transaction in billing system.",
+  "created_at": "2026-08-14T12:00:00.000Z"
+}
+```
+
+#### Get Message AI Insight
+```http
+GET /v1/inboxes/support-agent@yourdomain.com/messages/msg_12345/insight
+```
+
+---
+
 ### WebSockets (Real-Time Push Stream)
 
 Connect via standard WebSocket with your API key or Bearer token:
@@ -464,7 +558,7 @@ npm run deploy
 - [x] **Phase 1**: Core Mailbox & Ingestion Engine (D1 schema, Email Routing handler, Email Sending binding, R2 storage, REST API).
 - [x] **Phase 2**: Full-Text Search with SQLite FTS5, Conversation Threading, and Drafts / HITL Workflow.
 - [x] **Phase 3**: Real-time WebSockets with Durable Object Hibernation API & HMAC-Signed Webhook Subscriptions.
-- [ ] **Phase 4**: Multi-Tenant Pods, Allow/Block Lists, and Workers AI Auto-Labeling.
+- [x] **Phase 4**: Multi-Tenant Pods, Allow/Block Lists, and Workers AI Auto-Labeling.
 - [ ] **Phase 5**: Model Context Protocol (MCP) Server and Official TypeScript / Python SDKs.
 
 ---

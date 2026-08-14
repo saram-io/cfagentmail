@@ -1,9 +1,10 @@
 import { createMiddleware } from "hono/factory";
-import { verifyApiKey } from "../db/queries";
+import { verifyApiKey, getInbox } from "../db/queries";
 
 export interface AuthContext {
   apiKeyId?: string;
   inboxId?: string | null;
+  podId?: string | null;
   isMaster?: boolean;
 }
 
@@ -27,7 +28,7 @@ export const authMiddleware = createMiddleware<{
   // Master key check (if configured in env)
   const masterKey = (c.env as any).MASTER_API_KEY;
   if (masterKey && token && token === masterKey) {
-    c.set("auth", { isMaster: true, inboxId: null });
+    c.set("auth", { isMaster: true, inboxId: null, podId: null });
     return await next();
   }
 
@@ -38,27 +39,40 @@ export const authMiddleware = createMiddleware<{
       const match = c.req.path.match(/^\/v1\/inboxes\/([^/?#]+)/);
       const targetInboxId = match ? decodeURIComponent(match[1]) : undefined;
 
-      if (
-        verified.inboxId &&
-        targetInboxId &&
-        targetInboxId !== verified.inboxId &&
-        targetInboxId !== ""
-      ) {
-        return c.json(
-          {
-            error: {
-              code: "FORBIDDEN",
-              message: "API key is not authorized for this inbox",
+      if (targetInboxId && targetInboxId !== "") {
+        if (verified.inboxId && targetInboxId !== verified.inboxId) {
+          return c.json(
+            {
+              error: {
+                code: "FORBIDDEN",
+                message: "API key is not authorized for this inbox",
+              },
             },
-          },
-          403
-        );
+            403
+          );
+        }
+
+        if (verified.podId) {
+          const inbox = await getInbox(c.env.DB, targetInboxId);
+          if (inbox && inbox.podId !== verified.podId) {
+            return c.json(
+              {
+                error: {
+                  code: "FORBIDDEN",
+                  message: "API key is not authorized for inboxes outside its pod",
+                },
+              },
+              403
+            );
+          }
+        }
       }
 
       c.set("auth", {
         apiKeyId: verified.id,
         inboxId: verified.inboxId,
-        isMaster: !verified.inboxId,
+        podId: verified.podId,
+        isMaster: !verified.inboxId && !verified.podId,
       });
       return await next();
     } else {
@@ -87,6 +101,6 @@ export const authMiddleware = createMiddleware<{
     );
   }
 
-  c.set("auth", { isMaster: true, inboxId: null });
+  c.set("auth", { isMaster: true, inboxId: null, podId: null });
   return await next();
 });

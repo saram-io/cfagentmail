@@ -11,10 +11,13 @@ import {
   createAttachment,
   getAttachment,
   searchMessages,
+  saveAiInsightRecord,
+  getAiInsightRecord,
 } from "../db/queries";
 import { sendEmailViaBinding } from "../services/email-sender";
 import { saveAttachment, getAttachmentObject, getRawEmail } from "../services/storage";
 import { emitEvent } from "../services/realtime-notifier";
+import { analyzeEmailContent } from "../services/ai-classifier";
 import type { SendMessageRequest } from "../types";
 
 const messagesRouter = new Hono<{ Bindings: Env }>();
@@ -538,6 +541,92 @@ messagesRouter.post("/:inbox_id/messages/:message_id/reply", async (c) => {
     },
     201
   );
+});
+
+// POST /v1/inboxes/:inbox_id/messages/:message_id/analyze - Run AI analysis on email
+messagesRouter.post("/:inbox_id/messages/:message_id/analyze", async (c) => {
+  const inboxId = c.req.param("inbox_id");
+  const messageId = c.req.param("message_id");
+
+  const inbox = await getInbox(c.env.DB, inboxId);
+  if (!inbox) {
+    return c.json({ error: { code: "NOT_FOUND", message: "Inbox not found" } }, 404);
+  }
+
+  const message = await getMessage(c.env.DB, messageId, inbox.id);
+  if (!message) {
+    return c.json({ error: { code: "NOT_FOUND", message: "Message not found" } }, 404);
+  }
+
+  const analysis = await analyzeEmailContent(
+    (c.env as any).AI,
+    message.subject,
+    message.text || message.snippet || ""
+  );
+
+  const insightId = `ai_${crypto.randomUUID()}`;
+  const insight = await saveAiInsightRecord(c.env.DB, {
+    id: insightId,
+    messageId: message.id,
+    summary: analysis.summary,
+    sentiment: analysis.sentiment,
+    urgency: analysis.urgency,
+    labels: analysis.labels,
+    actionItem: analysis.actionItem,
+  });
+
+  // Merge newly discovered AI labels onto the message
+  const mergedLabels = Array.from(new Set([...(message.labels || []), ...analysis.labels]));
+  await updateMessage(c.env.DB, message.id, { labels: mergedLabels }, inbox.id);
+
+  // Emit real-time event
+  await emitEvent(
+    c.env,
+    "email.analyzed",
+    inbox.id,
+    { message_id: message.id, insight },
+    c.executionCtx
+  );
+
+  return c.json({
+    insight_id: insight.id,
+    id: insight.id,
+    message_id: insight.messageId,
+    summary: insight.summary,
+    sentiment: insight.sentiment,
+    urgency: insight.urgency,
+    labels: insight.labels,
+    action_item: insight.actionItem,
+    created_at: new Date(insight.createdAt).toISOString(),
+  });
+});
+
+// GET /v1/inboxes/:inbox_id/messages/:message_id/insight - Get AI insight
+messagesRouter.get("/:inbox_id/messages/:message_id/insight", async (c) => {
+  const inboxId = c.req.param("inbox_id");
+  const messageId = c.req.param("message_id");
+
+  const inbox = await getInbox(c.env.DB, inboxId);
+  if (!inbox) {
+    return c.json({ error: { code: "NOT_FOUND", message: "Inbox not found" } }, 404);
+  }
+
+  const insight = await getAiInsightRecord(c.env.DB, messageId);
+  if (!insight) {
+    return c.json({ error: { code: "NOT_FOUND", message: "AI insight not available for this message" } }, 404);
+  }
+
+  return c.json({
+    insight_id: insight.id,
+    id: insight.id,
+    message_id: insight.messageId,
+    summary: insight.summary,
+    sentiment: insight.sentiment,
+    urgency: insight.urgency,
+    labels: insight.labels,
+    action_item: insight.actionItem,
+    created_at: new Date(insight.createdAt).toISOString(),
+  });
 });
 
 // DELETE /v1/inboxes/:inbox_id/messages/:message_id - Delete message

@@ -1,7 +1,16 @@
 // CFAgentMail Core Type Definitions
 
+export interface Pod {
+  id: string;
+  name: string;
+  metadata: Record<string, string | number | boolean | null> | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface Inbox {
   id: string;
+  podId?: string | null;
   email: string;
   username: string;
   domain: string;
@@ -91,8 +100,30 @@ export interface Draft {
 export interface ApiKey {
   id: string;
   inboxId: string | null;
+  podId?: string | null;
   name: string;
   prefix: string;
+  createdAt: number;
+}
+
+export interface AccessRule {
+  id: string;
+  inboxId: string | null;
+  podId: string | null;
+  ruleType: "allow" | "block";
+  pattern: string;
+  action: "reject" | "spam";
+  createdAt: number;
+}
+
+export interface AiInsight {
+  id: string;
+  messageId: string;
+  summary: string;
+  sentiment: "positive" | "neutral" | "negative";
+  urgency: number; // 1 to 5
+  labels: string[];
+  actionItem?: string | null;
   createdAt: number;
 }
 
@@ -124,7 +155,8 @@ export type RealtimeEventType =
   | "email.sent"
   | "draft.created"
   | "draft.updated"
-  | "thread.updated";
+  | "thread.updated"
+  | "email.analyzed";
 
 export interface RealtimeEvent {
   type: RealtimeEventType;
@@ -144,9 +176,20 @@ export interface MessageSearchResult extends Message {
 
 // Request / Response payloads
 
+export interface CreatePodRequest {
+  name: string;
+  metadata?: Record<string, string | number | boolean | null>;
+}
+
+export interface UpdatePodRequest {
+  name?: string;
+  metadata?: Record<string, string | number | boolean | null> | null;
+}
+
 export interface CreateInboxRequest {
   username?: string;
   domain?: string;
+  podId?: string;
   displayName?: string;
   metadata?: Record<string, string | number | boolean | null>;
   clientId?: string;
@@ -154,7 +197,15 @@ export interface CreateInboxRequest {
 
 export interface UpdateInboxRequest {
   displayName?: string;
+  podId?: string | null;
   metadata?: Record<string, string | number | boolean | null> | null;
+}
+
+export interface CreateAccessRuleRequest {
+  ruleType: "allow" | "block";
+  pattern: string;
+  action?: "reject" | "spam";
+  podId?: string;
 }
 
 export interface SendMessageRequest {
@@ -239,6 +290,7 @@ export interface ListThreadsOptions {
 
 export interface CreateApiKeyRequest {
   name: string;
+  podId?: string;
 }
 
 export interface CreateApiKeyResponse {
@@ -246,6 +298,7 @@ export interface CreateApiKeyResponse {
   apiKey: string;
   name: string;
   inboxId: string | null;
+  podId?: string | null;
   createdAt: number;
 }
 

@@ -1,8 +1,17 @@
 import { env } from "cloudflare:test";
 
 export const STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS pods (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    metadata TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`,
+
   `CREATE TABLE IF NOT EXISTS inboxes (
     id TEXT PRIMARY KEY,
+    pod_id TEXT REFERENCES pods(id) ON DELETE CASCADE,
     email TEXT UNIQUE NOT NULL,
     username TEXT NOT NULL,
     domain TEXT NOT NULL,
@@ -15,6 +24,7 @@ export const STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS idx_inboxes_email ON inboxes(email)`,
   `CREATE INDEX IF NOT EXISTS idx_inboxes_client_id ON inboxes(client_id)`,
   `CREATE INDEX IF NOT EXISTS idx_inboxes_created_at ON inboxes(created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_inboxes_pod_id ON inboxes(pod_id)`,
 
   `CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY,
@@ -76,6 +86,7 @@ export const STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS api_keys (
     id TEXT PRIMARY KEY,
     inbox_id TEXT REFERENCES inboxes(id) ON DELETE CASCADE,
+    pod_id TEXT REFERENCES pods(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     key_hash TEXT NOT NULL UNIQUE,
     prefix TEXT NOT NULL,
@@ -83,6 +94,31 @@ export const STATEMENTS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash)`,
   `CREATE INDEX IF NOT EXISTS idx_api_keys_inbox_id ON api_keys(inbox_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_api_keys_pod_id ON api_keys(pod_id)`,
+
+  `CREATE TABLE IF NOT EXISTS access_rules (
+    id TEXT PRIMARY KEY,
+    inbox_id TEXT REFERENCES inboxes(id) ON DELETE CASCADE,
+    pod_id TEXT REFERENCES pods(id) ON DELETE CASCADE,
+    rule_type TEXT NOT NULL CHECK (rule_type IN ('allow', 'block')),
+    pattern TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT 'reject' CHECK (action IN ('reject', 'spam')),
+    created_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_access_rules_inbox_id ON access_rules(inbox_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_access_rules_pod_id ON access_rules(pod_id)`,
+
+  `CREATE TABLE IF NOT EXISTS ai_insights (
+    id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+    summary TEXT NOT NULL,
+    sentiment TEXT NOT NULL CHECK (sentiment IN ('positive', 'neutral', 'negative')),
+    urgency INTEGER NOT NULL CHECK (urgency BETWEEN 1 AND 5),
+    labels TEXT NOT NULL,
+    action_item TEXT,
+    created_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_ai_insights_message_id ON ai_insights(message_id)`,
 
   `CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     message_id UNINDEXED,
@@ -165,6 +201,8 @@ export async function setupTestDb() {
 
 export async function clearTestDb() {
   const deletes = [
+    "DELETE FROM ai_insights",
+    "DELETE FROM access_rules",
     "DELETE FROM webhook_deliveries",
     "DELETE FROM webhooks",
     "DELETE FROM attachments",
@@ -172,6 +210,7 @@ export async function clearTestDb() {
     "DELETE FROM threads",
     "DELETE FROM api_keys",
     "DELETE FROM inboxes",
+    "DELETE FROM pods",
   ];
   for (const d of deletes) {
     await env.DB.prepare(d).run();
@@ -183,7 +222,7 @@ export function createMockEmailMessage(opts: {
   to: string;
   rawMime: string;
   headers?: Record<string, string>;
-}): ForwardableEmailMessage {
+}): ForwardableEmailMessage & { rejected?: string } {
   const headers = new Headers(opts.headers || {});
   const encoder = new TextEncoder();
   const rawBytes = encoder.encode(opts.rawMime);
@@ -204,7 +243,10 @@ export function createMockEmailMessage(opts: {
     setReject(reason: string) {
       rejectedReason = reason;
     },
+    get rejected() {
+      return rejectedReason;
+    },
     async forward(rcptTo: string, headers?: Headers) {},
     async reply(message: any) {},
-  } as unknown as ForwardableEmailMessage;
+  } as unknown as ForwardableEmailMessage & { rejected?: string };
 }
